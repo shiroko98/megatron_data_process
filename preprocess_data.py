@@ -485,11 +485,15 @@ def _format_child_process_error(task_func, task_args, failed_process, error_info
         )
 
     task_desc = f"file {input_file!r}" if input_file is not None else f"args={task_args!r}"
-    return (
+    message = (
         f"Child process failed while running {error_info['task']} for {task_desc}: "
         f"{error_info['error_type']}: {error_info['error_message']} "
         f"(pid={failed_process.pid}, exitcode={failed_process.exitcode})."
     )
+    child_traceback = error_info.get("traceback")
+    if child_traceback:
+        message += f"\nChild traceback:\n{child_traceback}"
+    return message
 
 
 def _extract_input_file_from_task_args(task_args):
@@ -678,164 +682,32 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
 
 
 
+def run_from_args(args):
+    return process_data(
+        input=args.input,
+        output_prefix=args.output_prefix,
+        tokenizer_type=args.tokenizer_type,
+        vocab_file=args.vocab_file,
+        jsonl_keys=args.json_keys,
+        split_sentences=args.split_sentences,
+        keep_newlines=args.keep_newlines,
+        tokenizer_model=args.tokenizer_model,
+        vocab_size=args.vocab_size,
+        merge_file=args.merge_file,
+        workers=args.workers,
+        max_processes=args.max_processes,
+        log_interval=args.log_interval,
+        append_eod=args.append_eod,
+        lang=args.lang,
+        partitions=args.partitions,
+        merge_partitions=args.merge_partitions,
+        keep_sequential_samples=args.keep_sequential_samples,
+    )
+
+
 def main():
     args = get_args()
-
-    if args.split_sentences:
-        if nltk_available:
-            # nltk.data.find('tokenizers/punkt')
-            nltk.download("punkt", download_dir=os.environ.get("NLTK_DATA"))
-        else:
-            raise Exception(
-                "nltk library required for sentence splitting is not available.")
-
-    in_ss_out_names = []
-    if args.partitions == 1:
-        in_file_names = get_input_files(args.input)
-        if len(in_file_names) == 1:
-            file_name, extension = os.path.splitext(args.input)
-            sentence_split_file = file_name + "_ss" + extension
-            file_names = {
-                'partition': args.input,
-                'sentence_split': sentence_split_file,
-                'output_prefix': args.output_prefix}
-            in_ss_out_names.append(file_names) # 输入的文件
-        else:
-            for file in in_file_names:
-                file_name, extension = os.path.splitext(file)
-                sentence_split_file = file_name + "_ss" + extension
-                output_prefix = args.output_prefix + "_" + file_name.split('/')[-1]
-                file_names = {
-                'partition': file,
-                'sentence_split': sentence_split_file,
-                'output_prefix': output_prefix}
-                in_ss_out_names.append(file_names) # 输入的文件
-
-    else:
-        # in_file_names = glob.glob(args.input) # 写明通配符 # 匹配当前目录及所有子目录中的 txt 文件 txt_files = glob.glob('**/*.txt', recursive=True)
-        in_file_names = get_input_files(args.input)
-
-        # Count total number of lines across .jsonl files 
-        if args.keep_sequential_samples:
-            total_sample_count = 0
-            for filename in in_file_names:
-                with open(filename, "r") as fin:
-                    for fc, _ in enumerate(fin):
-                        pass
-                total_sample_count += (fc + 1)
-            partition_size = math.ceil(total_sample_count / args.partitions)
-
-        # create .jsonl parition files
-        for idx in range(args.partitions):
-            in_ss_out_name = get_file_name(args, idx)
-            in_ss_out_names.append(in_ss_out_name)
-
-        # check to see if paritions were already created
-        partitions_present = check_files_exist(in_ss_out_names, 'partition', args.partitions)
-
-        # check to see if paritions with split sentences already created
-        split_sentences_present = check_files_exist(in_ss_out_names, 'sentence_split', args.partitions)
-
-        if not partitions_present and not split_sentences_present:
-            # populate .jsonl partition files from parent files
-            partitioned_input_files = []
-            for idx in range(args.partitions):
-                partitioned_input_file = open(in_ss_out_names[idx]['partition'], 'w')
-                partitioned_input_files.append(partitioned_input_file) # partition文件句柄的列表
-
-            index = 0
-            if args.keep_sequential_samples: line_count = 0
-            for in_file_name in in_file_names: # 父jsonl文件
-                # support for gzip files
-                if in_file_name.endswith(".gz"):
-                    fin = gzip.open(in_file_name, 'rt')
-                else:
-                    fin = open(in_file_name, 'r', encoding='utf-8') # 打开父jsonl文件
-
-                for line in fin:
-                    partitioned_input_files[index].write(line) # 写入其中一个子partition文件
-                    if args.keep_sequential_samples:
-                        line_count += 1
-                        if line_count % partition_size == 0: # 若sequential，写满一个子文件再写另一个
-                            index += 1
-                    else:
-                        index = (index + 1)%args.partitions # 否则多个子partition文件换着写
-
-                fin.close()
-
-            for idx in range(args.partitions):
-                partitioned_input_files[idx].close()
-
-    assert args.workers % args.partitions == 0
-    partition = Partition(args, args.workers//args.partitions)
-
-    # check to see if paritions with split sentences already created
-    split_sentences_present = check_files_exist(in_ss_out_names, 'sentence_split', args.partitions)
-
-    # split sentences in partition files
-    if args.split_sentences and not split_sentences_present:
-        task_args_list = [(name['partition'], name['sentence_split']) for name in in_ss_out_names]
-        manage_processes(partition.split_sentences, task_args_list, args.max_processes)
-        # processes = []
-        # for name in in_ss_out_names:
-        #     p = multiprocessing.Process(target=partition.split_sentences,
-        #                                 args=((name['partition'], name['sentence_split']),))
-        #     p.start()
-        #     processes.append(p)
-
-        # for p in processes:
-        #     p.join()
-
-        # if args.partitions == 1: # 若是单一文件则结束，若不分区且split，则只到split _ss结束，不encode，感觉不对，所以注释掉
-        #     return
-
-
-    # encode partition files in parallel
-    input_key = 'sentence_split' if args.split_sentences else 'partition'
-    task_args_list = [(name[input_key], name['output_prefix']) for name in in_ss_out_names]
-    manage_processes(partition.process_json_file, task_args_list, args.max_processes)
-    # processes = []
-    # input_key = 'sentence_split' if args.split_sentences else 'partition' 
-    # for name in in_ss_out_names: # # 每个输入的文件都有一个独立的进程管理
-    #     p = multiprocessing.Process(target=partition.process_json_file,
-    #                                 args=((name[input_key], name['output_prefix']),))
-    #     p.start()
-    #     processes.append(p)
-
-    # for p in processes:
-    #     p.join()
-
-    if len(in_file_names) == 1:
-        return
-
-    # merge bin/idx partitions
-    if args.merge_partitions:
-        merge_files(args, in_ss_out_names)
-    # level = "document"
-    # if args.split_sentences:
-    #     level = "sentence"
-
-    # output_bin_files = {}
-    # output_idx_files = {}
-    # builders = {}
-    # tokenizer = build_tokenizer(args)
-
-    # for key in args.json_keys:
-    #     output_bin_files[key] = "{}_{}_{}.bin".format(args.output_prefix,
-    #                                                   key, level)
-    #     output_idx_files[key] = "{}_{}_{}.idx".format(args.output_prefix,
-    #                                                   key, level)
-    #     builders[key] = indexed_dataset.IndexedDatasetBuilder(
-    #         output_bin_files[key],
-    #         dtype=indexed_dataset.DType.optimal_dtype(tokenizer.vocab_size),
-    #     )
-
-    #     for name in in_ss_out_names:
-    #         parition_output_prefix = name['output_prefix']
-    #         full_partition_output_prefix = "{}_{}_{}".format(parition_output_prefix,
-    #                                                          key, level)
-    #         builders[key].add_index(full_partition_output_prefix)
-    #     builders[key].finalize(output_idx_files[key])
+    return run_from_args(args)
 
 
 if __name__ == '__main__':
