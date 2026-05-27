@@ -54,6 +54,7 @@ class RWKVTokenizer():
     def __init__(self, vocab_file, vocab_extra_ids):
         self.vocab_file = vocab_file
         self.tokenizer = pyrwkv_tokenizer.RWKVTokenizer(vocab_filepath=vocab_file)
+        self._vocab_size = self.tokenizer.vocab_size()
         self.eod_id = 65532
 
         self._idx2token = {}
@@ -76,7 +77,7 @@ class RWKVTokenizer():
 
     @property
     def vocab_size(self):
-        return 65532
+        return self._vocab_size
 
     @property
     def vocab(self):

@@ -18,6 +18,8 @@ def test_rwkv_tokenizer_uses_specified_vocab_file() -> None:
     tokenizer = RWKVTokenizer(str(RWKV_VOCAB), vocab_extra_ids=0)
 
     assert tokenizer.tokenizer.vocab_filepath == str(RWKV_VOCAB)
+    assert tokenizer.vocab_size == tokenizer.tokenizer.vocab_size()
+    assert tokenizer.vocab_size > tokenizer.eod
     assert tokenizer.tokenize("hello world")
 
 
