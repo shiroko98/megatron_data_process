@@ -69,9 +69,9 @@ def test_cli_entrypoint_honors_arguments(sample_jsonl: Path, tmp_path: Path) -> 
         "--output-prefix",
         str(output_prefix),
         "--tokenizer-type",
-        "RWKVTokenizer",
+        "HFTokenizer",
         "--vocab-file",
-        str(RWKV_VOCAB),
+        str(PROJECT_ROOT / "Qwen1.5-14B-Chat"),
         "--workers",
         "1",
         "--max-processes",
@@ -86,3 +86,17 @@ def test_cli_entrypoint_honors_arguments(sample_jsonl: Path, tmp_path: Path) -> 
     )
 
     assert result.returncode == 0, result.stderr
+    assert (tmp_path / "cli_out_text_document.bin").exists()
+    assert (tmp_path / "cli_out_text_document.idx").exists()
+
+
+def _crash_task(_: object) -> None:
+    raise RuntimeError("expected child failure")
+
+
+def test_manage_processes_raises_on_child_failure() -> None:
+    with pytest.raises(
+        RuntimeError,
+        match=r"Child process failed while running .*RuntimeError: expected child failure",
+    ):
+        preprocess_data.manage_processes(_crash_task, [object()], max_processes=1)

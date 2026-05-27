@@ -11,9 +11,11 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),
 import time
 import gzip
 import glob
+import traceback
 import torch
 import numpy as np
 import multiprocessing
+from queue import Empty
 try:
     import nltk
     nltk_available = True
@@ -404,18 +406,102 @@ def merge_files(args, in_ss_out_names):
 def manage_processes(task_func, task_args_list, max_processes):
     """管理进程的函数，限制最大并发进程数"""
     active_processes = []
+    error_queue = multiprocessing.Queue()
+    reported_errors = {}
     while task_args_list or active_processes:
         # 如果有空闲进程槽且还有任务未启动，则启动新的进程
         while task_args_list and len(active_processes) < max_processes:
-            args = task_args_list.pop(0)  # 获取一组待处理参数
-            p = multiprocessing.Process(target=task_func, args=(args,))
+            task_args = task_args_list.pop(0)  # 获取一组待处理参数
+            p = multiprocessing.Process(
+                target=_run_task_with_error_reporting,
+                args=(task_func, task_args, error_queue),
+            )
             p.start()
-            active_processes.append(p)
+            active_processes.append((p, task_args))
+
+        _drain_error_queue(error_queue, reported_errors)
         
-        # 检查已启动的进程是否结束，移除已结束的进程
-        active_processes = [p for p in active_processes if p.is_alive()]
+        next_active_processes = []
+        failed_process_info = None
+        for p, task_args in active_processes:
+            if p.is_alive():
+                next_active_processes.append((p, task_args))
+                continue
+
+            p.join()
+            _drain_error_queue(error_queue, reported_errors)
+            if p.exitcode != 0 and failed_process_info is None:
+                failed_process_info = (p, task_args, reported_errors.get(p.pid))
+
+        if failed_process_info is not None:
+            failed_process, failed_task_args, error_info = failed_process_info
+            for p, _ in next_active_processes:
+                p.terminate()
+                p.join()
+            raise RuntimeError(_format_child_process_error(
+                task_func,
+                failed_task_args,
+                failed_process,
+                error_info,
+            ))
+
+        active_processes = next_active_processes
 
         time.sleep(0.5)  # 稍微等待一下再次检查
+
+
+def _run_task_with_error_reporting(task_func, task_args, error_queue):
+    try:
+        task_func(task_args)
+    except Exception as exc:
+        error_queue.put({
+            "pid": os.getpid(),
+            "task": task_func.__qualname__,
+            "task_args": repr(task_args),
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "traceback": traceback.format_exc(),
+        })
+        raise
+
+
+def _drain_error_queue(error_queue, reported_errors):
+    while True:
+        try:
+            error_info = error_queue.get_nowait()
+        except Empty:
+            break
+        reported_errors[error_info["pid"]] = error_info
+
+
+def _format_child_process_error(task_func, task_args, failed_process, error_info):
+    input_file = _extract_input_file_from_task_args(task_args)
+
+    if error_info is None:
+        return (
+            "Child process failed while running "
+            f"{task_func.__qualname__} with args={task_args!r} "
+            f"(pid={failed_process.pid}, exitcode={failed_process.exitcode})."
+        )
+
+    task_desc = f"file {input_file!r}" if input_file is not None else f"args={task_args!r}"
+    return (
+        f"Child process failed while running {error_info['task']} for {task_desc}: "
+        f"{error_info['error_type']}: {error_info['error_message']} "
+        f"(pid={failed_process.pid}, exitcode={failed_process.exitcode})."
+    )
+
+
+def _extract_input_file_from_task_args(task_args):
+    if isinstance(task_args, str):
+        return task_args
+
+    if isinstance(task_args, (tuple, list)) and task_args:
+        first_arg = task_args[0]
+        if isinstance(first_arg, str):
+            return first_arg
+
+    return None
 
 def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["text"], split_sentences=False, keep_newlines=False, tokenizer_model=None, vocab_size=65532, merge_file=None, workers=6, max_processes=6, log_interval=1000, append_eod=True, lang='english', partitions=1, merge_partitions=True, keep_sequential_samples=False):
     args = argparse.Namespace(
