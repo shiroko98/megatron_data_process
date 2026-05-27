@@ -1,6 +1,6 @@
 硬问题
 
-preprocess_data.py (line 31) 对 nltk 有导入期硬依赖。上面虽然 try/except 了 import nltk，preprocess_data.py (line 17) 到 preprocess_data.py (line 21)，但紧接着类定义 CustomLanguageVars(nltk.tokenize...) 还是会在 import 阶段直接引用 nltk。也就是说，哪怕你根本不用 split_sentences，只要没装 nltk，脚本本身就可能 import 失败。
+[done] preprocess_data.py (line 31) 对 nltk 有导入期硬依赖。上面虽然 try/except 了 import nltk，preprocess_data.py (line 17) 到 preprocess_data.py (line 21)，但紧接着类定义 CustomLanguageVars(nltk.tokenize...) 还是会在 import 阶段直接引用 nltk。也就是说，哪怕你根本不用 split_sentences，只要没装 nltk，脚本本身就可能 import 失败。
 
 [done] preprocess_data.py (line 755) 的 __main__ 入口已经坏了。现在不是跑 main()，而是写死调用了一次 process_data(...)，preprocess_data.py (line 758)。所以直接 python preprocess_data.py --input ... 这种 CLI 用法在当前版本下不安全，参数会被无视。
 

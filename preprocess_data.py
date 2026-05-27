@@ -30,17 +30,21 @@ logging.basicConfig(filename='error.log', level=logging.ERROR)
 MAX_PROCESSES = 5
 
 # https://stackoverflow.com/questions/33139531/preserve-empty-lines-with-nltks-punkt-tokenizer
-class CustomLanguageVars(nltk.tokenize.punkt.PunktLanguageVars):
+if nltk_available:
+    class CustomLanguageVars(nltk.tokenize.punkt.PunktLanguageVars):
 
-    _period_context_fmt = r"""
-        \S*                          # some word material
-        %(SentEndChars)s             # a potential sentence ending
-        \s*                       #  <-- THIS is what I changed
-        (?=(?P<after_tok>
-            %(NonWord)s              # either other punctuation
-            |
-            (?P<next_tok>\S+)     #  <-- Normally you would have \s+ here
-        ))"""
+        _period_context_fmt = r"""
+            \S*                          # some word material
+            %(SentEndChars)s             # a potential sentence ending
+            \s*                       #  <-- THIS is what I changed
+            (?=(?P<after_tok>
+                %(NonWord)s              # either other punctuation
+                |
+                (?P<next_tok>\S+)     #  <-- Normally you would have \s+ here
+            ))"""
+else:
+    class CustomLanguageVars(object):
+        pass
 
 class IdentitySplitter(object):
     def tokenize(self, *text):

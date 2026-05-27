@@ -1,6 +1,7 @@
 import argparse
 import builtins
 import json
+import importlib.util
 import time
 from pathlib import Path
 
@@ -338,6 +339,23 @@ def test_encoder_initializer_requires_nltk_when_splitting(monkeypatch):
 
     with pytest.raises(SystemExit):
         encoder.initializer()
+
+
+def test_preprocess_module_imports_without_nltk(tmp_path: Path):
+    module_path = PROJECT_ROOT / "preprocess_data.py"
+    source = module_path.read_text(encoding="utf-8")
+    source = source.replace("    import nltk\n    nltk_available = True", "    raise ImportError('mocked missing nltk')")
+
+    temp_module = tmp_path / "preprocess_data_no_nltk.py"
+    temp_module.write_text(source, encoding="utf-8")
+
+    spec = importlib.util.spec_from_file_location("preprocess_data_no_nltk", temp_module)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    assert module.nltk_available is False
+    assert module.CustomLanguageVars is not None
 
 
 def test_encoder_split_serializes_sentences():
