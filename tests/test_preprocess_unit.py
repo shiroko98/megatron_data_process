@@ -57,9 +57,57 @@ def test_get_file_name_for_directory_input():
 
     result = preprocess_data.get_file_name(args, 2)
 
-    assert result["partition"].endswith("temp_2.jsonl")
-    assert result["sentence_split"].endswith("temp_ss_2.jsonl")
+    assert result["partition"].endswith("out_intermediate\\temp_2.jsonl")
+    assert result["sentence_split"].endswith("out_intermediate\\temp_ss_2.jsonl")
     assert result["output_prefix"] == "out_2"
+
+
+def test_get_sentence_split_file_for_directory_input_preserves_relative_structure(tmp_path: Path):
+    input_dir = tmp_path / "inputs"
+    nested = input_dir / "nested"
+    nested.mkdir(parents=True)
+    source = nested / "article.jsonl"
+    source.write_text('{"text":"hello"}\n', encoding="utf-8")
+    args = _build_args(input=str(input_dir), output_prefix=str(tmp_path / "out"))
+
+    result = preprocess_data.get_sentence_split_file(args, str(source))
+
+    assert result.endswith("out_intermediate\\nested\\article_ss.jsonl")
+    assert Path(result).parent.exists()
+
+
+def test_get_sentence_split_file_for_single_file_input_uses_intermediate_dir(tmp_path: Path):
+    source = tmp_path / "article.jsonl"
+    source.write_text('{"text":"hello"}\n', encoding="utf-8")
+    args = _build_args(input=str(source), output_prefix=str(tmp_path / "out"))
+
+    result = preprocess_data.get_sentence_split_file(args, str(source))
+
+    assert result.endswith("out_intermediate\\article_ss.jsonl")
+    assert Path(result).parent.exists()
+
+
+def test_remove_empty_dirs_removes_empty_tree(tmp_path: Path):
+    root = tmp_path / "intermediate"
+    nested = root / "a" / "b"
+    nested.mkdir(parents=True)
+
+    preprocess_data.remove_empty_dirs(str(root))
+
+    assert not root.exists()
+
+
+def test_remove_empty_dirs_keeps_tree_with_files(tmp_path: Path):
+    root = tmp_path / "intermediate"
+    nested = root / "a" / "b"
+    nested.mkdir(parents=True)
+    kept_file = nested / "keep.txt"
+    kept_file.write_text("keep", encoding="utf-8")
+
+    preprocess_data.remove_empty_dirs(str(root))
+
+    assert root.exists()
+    assert kept_file.exists()
 
 
 def test_check_files_exist_uses_requested_count(tmp_path: Path):
@@ -99,17 +147,18 @@ def test_get_input_files_directory_is_recursive_and_unsorted_contract(multi_file
     assert any(path.endswith("b.jsonl") for path in result)
 
 
-def test_get_input_files_ignores_intermediate_jsonl_outputs(multi_file_input_dir: Path):
-    (multi_file_input_dir / "temp_0.jsonl").write_text('{"text":"temp"}\n', encoding="utf-8")
-    (multi_file_input_dir / "b_ss.jsonl").write_text('{"text":["split"]}\n', encoding="utf-8")
+def test_get_input_files_keeps_legitimate_jsonl_names(multi_file_input_dir: Path):
+    (multi_file_input_dir / "temperature_data.jsonl").write_text('{"text":"temp"}\n', encoding="utf-8")
+    (multi_file_input_dir / "cross_ss_validation.jsonl").write_text('{"text":"split"}\n', encoding="utf-8")
     nested = multi_file_input_dir / "nested"
-    (nested / "temp_ss_1.jsonl").write_text('{"text":["temp split"]}\n', encoding="utf-8")
+    (nested / "assessment_ss_notes.jsonl").write_text('{"text":"notes"}\n', encoding="utf-8")
 
     result = preprocess_data.get_input_files(str(multi_file_input_dir))
 
-    assert len(result) == 2
-    assert all("_ss" not in Path(path).name for path in result)
-    assert all(not Path(path).name.lower().startswith("temp") for path in result)
+    assert len(result) == 5
+    assert any(path.endswith("temperature_data.jsonl") for path in result)
+    assert any(path.endswith("cross_ss_validation.jsonl") for path in result)
+    assert any(path.endswith("assessment_ss_notes.jsonl") for path in result)
 
 
 def test_get_input_files_single_file(sample_jsonl: Path):
@@ -633,7 +682,6 @@ def test_process_data_requires_nltk_for_sentence_split(sample_jsonl: Path, tmp_p
 
 
 def test_process_data_multiple_files_partitions_one_uses_per_file_outputs(monkeypatch, multi_file_input_dir: Path, tmp_path: Path):
-    pytest.xfail("Windows basename handling for multi-file outputs is a separate pending task.")
     calls = []
     monkeypatch.setattr(preprocess_data, "manage_processes", lambda task, args, max_processes: calls.append(args))
 
@@ -674,8 +722,12 @@ def test_process_data_partitioning_keeps_sequential_order(
         keep_sequential_samples=True,
     )
 
-    part0 = sample_jsonl.with_name(sample_jsonl.stem + "_0" + sample_jsonl.suffix)
-    part1 = sample_jsonl.with_name(sample_jsonl.stem + "_1" + sample_jsonl.suffix)
+    intermediate_dir = Path(preprocess_data.get_intermediate_dir(_build_args(
+        input=str(sample_jsonl),
+        output_prefix=str(tmp_path / "out"),
+    )))
+    part0 = intermediate_dir / "temp_0.jsonl"
+    part1 = intermediate_dir / "temp_1.jsonl"
     part0_rows = _read_jsonl_rows(part0)
     part1_rows = _read_jsonl_rows(part1)
     partition_size = (len(sample_rows) + 1) // 2
@@ -704,8 +756,12 @@ def test_process_data_partitioning_round_robins_when_not_sequential(
         keep_sequential_samples=False,
     )
 
-    part0 = sample_jsonl.with_name(sample_jsonl.stem + "_0" + sample_jsonl.suffix)
-    part1 = sample_jsonl.with_name(sample_jsonl.stem + "_1" + sample_jsonl.suffix)
+    intermediate_dir = Path(preprocess_data.get_intermediate_dir(_build_args(
+        input=str(sample_jsonl),
+        output_prefix=str(tmp_path / "out"),
+    )))
+    part0 = intermediate_dir / "temp_0.jsonl"
+    part1 = intermediate_dir / "temp_1.jsonl"
 
     assert _read_jsonl_rows(part0) == sample_rows[0::2]
     assert _read_jsonl_rows(part1) == sample_rows[1::2]
@@ -733,6 +789,8 @@ def test_process_data_calls_split_then_encode_when_requested(monkeypatch, sample
 
     assert calls[0][0] == "split_sentences"
     assert calls[1][0] == "process_json_file"
+    split_args = calls[0][1]
+    assert split_args[0][1].endswith("out_intermediate\\sample_ss.jsonl")
 
 
 def test_process_data_multi_file_partitions_one_rechecks_all_sentence_split_outputs(
@@ -772,4 +830,65 @@ def test_process_data_multi_file_partitions_one_rechecks_all_sentence_split_outp
 
     assert calls[0][0] == "split_sentences"
     assert len(calls[0][1]) == 2
+    assert any(task[1].endswith("out_intermediate\\b_ss.jsonl") for task in calls[0][1])
+    assert any(task[1].endswith("out_intermediate\\nested\\a_ss.jsonl") for task in calls[0][1])
     assert calls[1][0] == "process_json_file"
+
+
+def test_process_data_removes_empty_intermediate_dir_on_success(monkeypatch, sample_jsonl: Path, tmp_path: Path):
+    monkeypatch.setattr(preprocess_data.nltk, "download", lambda *args, **kwargs: None)
+
+    def fake_manage(task, args, max_processes):
+        for task_args in args:
+            input_path = Path(task_args[1] if task.__name__ == "split_sentences" else task_args[0])
+            input_path.parent.mkdir(parents=True, exist_ok=True)
+            input_path.write_text("", encoding="utf-8")
+            input_path.unlink()
+
+    monkeypatch.setattr(preprocess_data, "manage_processes", fake_manage)
+
+    preprocess_data.process_data(
+        input=str(sample_jsonl),
+        output_prefix=str(tmp_path / "out"),
+        tokenizer_type="HFTokenizer",
+        vocab_file=str(PROJECT_ROOT / "Qwen1.5-14B-Chat"),
+        workers=1,
+        max_processes=1,
+        split_sentences=True,
+        merge_partitions=False,
+    )
+
+    intermediate_dir = Path(preprocess_data.get_intermediate_dir(_build_args(
+        input=str(sample_jsonl),
+        output_prefix=str(tmp_path / "out"),
+    )))
+    assert not intermediate_dir.exists()
+
+
+def test_process_data_keeps_nonempty_intermediate_dir_on_success(monkeypatch, sample_jsonl: Path, tmp_path: Path):
+    monkeypatch.setattr(preprocess_data.nltk, "download", lambda *args, **kwargs: None)
+
+    def fake_manage(task, args, max_processes):
+        for task_args in args:
+            input_path = Path(task_args[1] if task.__name__ == "split_sentences" else task_args[0])
+            input_path.parent.mkdir(parents=True, exist_ok=True)
+            input_path.write_text("leftover", encoding="utf-8")
+
+    monkeypatch.setattr(preprocess_data, "manage_processes", fake_manage)
+
+    preprocess_data.process_data(
+        input=str(sample_jsonl),
+        output_prefix=str(tmp_path / "out"),
+        tokenizer_type="HFTokenizer",
+        vocab_file=str(PROJECT_ROOT / "Qwen1.5-14B-Chat"),
+        workers=1,
+        max_processes=1,
+        split_sentences=True,
+        merge_partitions=False,
+    )
+
+    intermediate_dir = Path(preprocess_data.get_intermediate_dir(_build_args(
+        input=str(sample_jsonl),
+        output_prefix=str(tmp_path / "out"),
+    )))
+    assert intermediate_dir.exists()

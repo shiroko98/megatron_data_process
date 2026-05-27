@@ -326,18 +326,48 @@ def get_args():
 
 
 def get_file_name(args, file_id):
-    file_name, extension = os.path.splitext(args.input) # 这块和glob冲突了，因为通配符被当作了文件名，所以不能使用glob里面带通配符，不过问题不大，只是中间的partition文件名字有问题，输出没问题
-    if not extension:
-        file_name += "/temp"
-        extension = ".jsonl"
-    input_file_name = file_name + "_" + str(file_id) + extension
-    sentence_split_file = file_name + "_ss_" + str(file_id) + extension
+    intermediate_dir = get_intermediate_dir(args)
+    os.makedirs(intermediate_dir, exist_ok=True)
+    input_file_name = os.path.join(intermediate_dir, f"temp_{file_id}.jsonl")
+    sentence_split_file = os.path.join(intermediate_dir, f"temp_ss_{file_id}.jsonl")
     output_prefix = args.output_prefix + "_" + str(file_id)
     file_names = {
         'partition': input_file_name,
         'sentence_split': sentence_split_file,
         'output_prefix': output_prefix}
     return file_names
+
+
+def get_intermediate_dir(args):
+    return os.path.abspath(args.output_prefix) + "_intermediate"
+
+
+def get_sentence_split_file(args, input_file):
+    intermediate_dir = get_intermediate_dir(args)
+    input_file_abs = os.path.abspath(input_file)
+
+    if os.path.isdir(args.input):
+        relative_input = os.path.relpath(input_file_abs, os.path.abspath(args.input))
+    else:
+        relative_input = os.path.basename(input_file_abs)
+
+    file_name, extension = os.path.splitext(relative_input)
+    sentence_split_file = os.path.join(intermediate_dir, file_name + "_ss" + extension)
+    os.makedirs(os.path.dirname(sentence_split_file), exist_ok=True)
+    return sentence_split_file
+
+
+def remove_empty_dirs(path):
+    if not os.path.isdir(path):
+        return
+
+    for entry in os.listdir(path):
+        child_path = os.path.join(path, entry)
+        if os.path.isdir(child_path):
+            remove_empty_dirs(child_path)
+
+    if not os.listdir(path):
+        os.rmdir(path)
 
 
 def check_files_exist(in_ss_out_names, key, num_partitions=None):
@@ -358,12 +388,8 @@ def get_input_files(input_path):
         file_list = []
         for root, dirs, files in os.walk(input_path):
             for file in files:
-                lower_file = file.lower()
-                if not lower_file.endswith('.jsonl'):
-                    continue
-                if lower_file.startswith("temp") or "_ss" in lower_file:
-                    continue
-                file_list.append(os.path.join(root, file))
+                if file.lower().endswith('.jsonl'):  # 使用endswith并忽略大小写
+                    file_list.append(os.path.join(root, file))
         return file_list
     elif os.path.isfile(input_path) and input_path.lower().endswith('.jsonl'):
         return [input_path]  # 确保单个文件也是.jsonl文件
@@ -564,18 +590,16 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
     if args.partitions == 1:
         in_file_names = get_input_files(args.input)
         if len(in_file_names) == 1:
-            file_name, extension = os.path.splitext(in_file_names[0])
-            sentence_split_file = file_name + "_ss" + extension
             file_names = {
                 'partition': in_file_names[0],
-                'sentence_split': sentence_split_file,
+                'sentence_split': get_sentence_split_file(args, in_file_names[0]),
                 'output_prefix': args.output_prefix}
             in_ss_out_names.append(file_names) # 输入的文件
         else:
             for file in in_file_names:
                 file_name, extension = os.path.splitext(file)
-                sentence_split_file = file_name + "_ss" + extension
-                output_prefix = args.output_prefix + "_" + file_name.split('/')[-1]
+                sentence_split_file = get_sentence_split_file(args, file)
+                output_prefix = args.output_prefix + "_" + os.path.basename(file_name)
                 file_names = {
                 'partition': file,
                 'sentence_split': sentence_split_file,
@@ -681,11 +705,14 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
     #     p.join()
 
     if len(in_file_names) == 1 and partitions == 1:
+        remove_empty_dirs(get_intermediate_dir(args))
         return
 
     # merge bin/idx partitions
     if args.merge_partitions:
         merge_files(args, in_ss_out_names)
+
+    remove_empty_dirs(get_intermediate_dir(args))
 
 
 
