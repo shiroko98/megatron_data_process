@@ -340,7 +340,10 @@ def get_file_name(args, file_id):
     return file_names
 
 
-def check_files_exist(in_ss_out_names, key, num_partitions):
+def check_files_exist(in_ss_out_names, key, num_partitions=None):
+    if num_partitions is None:
+        num_partitions = len(in_ss_out_names)
+
     for i in range(num_partitions):
         if not os.path.exists(in_ss_out_names[i][key]):
             return False
@@ -355,8 +358,12 @@ def get_input_files(input_path):
         file_list = []
         for root, dirs, files in os.walk(input_path):
             for file in files:
-                if file.lower().endswith('.jsonl'):  # 使用endswith并忽略大小写
-                    file_list.append(os.path.join(root, file))
+                lower_file = file.lower()
+                if not lower_file.endswith('.jsonl'):
+                    continue
+                if lower_file.startswith("temp") or "_ss" in lower_file:
+                    continue
+                file_list.append(os.path.join(root, file))
         return file_list
     elif os.path.isfile(input_path) and input_path.lower().endswith('.jsonl'):
         return [input_path]  # 确保单个文件也是.jsonl文件
@@ -638,7 +645,7 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
     partition = Partition(args, args.workers//args.partitions) 
 
     # check to see if paritions with split sentences already created
-    split_sentences_present = check_files_exist(in_ss_out_names, 'sentence_split', args.partitions)
+    split_sentences_present = check_files_exist(in_ss_out_names, 'sentence_split')
 
     # split sentences in partition files
     if args.split_sentences and not split_sentences_present:

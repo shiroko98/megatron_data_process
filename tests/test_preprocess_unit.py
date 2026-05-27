@@ -79,6 +79,17 @@ def test_check_files_exist_uses_requested_count(tmp_path: Path):
     )
 
 
+def test_check_files_exist_defaults_to_checking_all_entries(tmp_path: Path):
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    first.write_text("", encoding="utf-8")
+
+    assert not preprocess_data.check_files_exist(
+        [{"partition": str(first)}, {"partition": str(second)}],
+        "partition",
+    )
+
+
 def test_get_input_files_directory_is_recursive_and_unsorted_contract(multi_file_input_dir: Path):
     result = preprocess_data.get_input_files(str(multi_file_input_dir))
 
@@ -86,6 +97,19 @@ def test_get_input_files_directory_is_recursive_and_unsorted_contract(multi_file
     assert all(path.endswith(".jsonl") for path in result)
     assert any(path.endswith("a.jsonl") for path in result)
     assert any(path.endswith("b.jsonl") for path in result)
+
+
+def test_get_input_files_ignores_intermediate_jsonl_outputs(multi_file_input_dir: Path):
+    (multi_file_input_dir / "temp_0.jsonl").write_text('{"text":"temp"}\n', encoding="utf-8")
+    (multi_file_input_dir / "b_ss.jsonl").write_text('{"text":["split"]}\n', encoding="utf-8")
+    nested = multi_file_input_dir / "nested"
+    (nested / "temp_ss_1.jsonl").write_text('{"text":["temp split"]}\n', encoding="utf-8")
+
+    result = preprocess_data.get_input_files(str(multi_file_input_dir))
+
+    assert len(result) == 2
+    assert all("_ss" not in Path(path).name for path in result)
+    assert all(not Path(path).name.lower().startswith("temp") for path in result)
 
 
 def test_get_input_files_single_file(sample_jsonl: Path):
@@ -708,4 +732,44 @@ def test_process_data_calls_split_then_encode_when_requested(monkeypatch, sample
     )
 
     assert calls[0][0] == "split_sentences"
+    assert calls[1][0] == "process_json_file"
+
+
+def test_process_data_multi_file_partitions_one_rechecks_all_sentence_split_outputs(
+    monkeypatch,
+    multi_file_input_dir: Path,
+    tmp_path: Path,
+):
+    calls = []
+    monkeypatch.setattr(preprocess_data.nltk, "download", lambda *args, **kwargs: None)
+
+    def fake_manage(task, args, max_processes):
+        calls.append((task.__name__, list(args)))
+
+    monkeypatch.setattr(preprocess_data, "manage_processes", fake_manage)
+    original_exists = preprocess_data.os.path.exists
+
+    def fake_exists(path):
+        normalized = str(path).replace("\\", "/")
+        if normalized.endswith("/b_ss.jsonl"):
+            return True
+        if normalized.endswith("/a_ss.jsonl"):
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr(preprocess_data.os.path, "exists", fake_exists)
+
+    preprocess_data.process_data(
+        input=str(multi_file_input_dir),
+        output_prefix=str(tmp_path / "out"),
+        tokenizer_type="HFTokenizer",
+        vocab_file=str(PROJECT_ROOT / "Qwen1.5-14B-Chat"),
+        workers=1,
+        max_processes=1,
+        split_sentences=True,
+        merge_partitions=False,
+    )
+
+    assert calls[0][0] == "split_sentences"
+    assert len(calls[0][1]) == 2
     assert calls[1][0] == "process_json_file"
