@@ -1,5 +1,6 @@
 """Megatron tokenizers."""
 
+import ast
 from abc import ABC
 from abc import abstractmethod
 from megatron_tokenizer import MegatronTokenizer
@@ -68,7 +69,7 @@ class RWKVTokenizer():
             lines = f.readlines()
         for l in lines:
             idx = int(l[:l.index(' ')])
-            x = eval(l[l.index(' '):l.rindex(' ')])
+            x = _parse_rwkv_vocab_token(l[l.index(' '):l.rindex(' ')])
             x = x.encode("utf-8") if isinstance(x, str) else x
             assert isinstance(x, bytes)
             assert len(x) == int(l[l.rindex(' '):])
@@ -116,6 +117,13 @@ class RWKVTokenizer():
     @property
     def additional_special_tokens_ids(self):
         return None
+
+
+def _parse_rwkv_vocab_token(token_literal):
+    value = ast.literal_eval(token_literal.strip())
+    if not isinstance(value, (str, bytes)):
+        raise ValueError(f"Unsupported RWKV vocab token literal: {token_literal!r}")
+    return value
 
 class _HFTokenizer(MegatronTokenizer):
     """_HFTokenizer for Hf Pretrained model loading."""

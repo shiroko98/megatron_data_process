@@ -10,6 +10,7 @@ import pytest
 
 import indexed_dataset
 import preprocess_data
+from my_tokenizer import _parse_rwkv_vocab_token
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -183,6 +184,11 @@ def test_extract_input_file_from_task_args():
     assert preprocess_data._extract_input_file_from_task_args("a.jsonl") == "a.jsonl"
     assert preprocess_data._extract_input_file_from_task_args(("a.jsonl", "out")) == "a.jsonl"
     assert preprocess_data._extract_input_file_from_task_args((123, "out")) is None
+
+
+def test_parse_rwkv_vocab_token_supports_bytes_and_strings():
+    assert _parse_rwkv_vocab_token(r" b'\x00'") == b"\x00"
+    assert _parse_rwkv_vocab_token(" '<|endoftext|>'") == "<|endoftext|>"
 
 
 def test_format_child_process_error_with_error_info():

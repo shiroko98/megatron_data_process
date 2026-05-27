@@ -20,7 +20,7 @@ preprocess_data.py (line 722) 里 main() 的提前返回条件也有问题。它
 
 [done] my_tokenizer.py (line 77) 的 vocab_size 被硬编码成了 65529。它不是从 vocab_file 动态读出来的，也不是从底层 tokenizer 取的。如果你实际词表不是这个大小，就会出现 vocab 元信息和真实编码器不一致的问题。
 
-my_tokenizer.py (line 69) 用 eval() 解析词表文件内容。这对“自己完全信任的本地词表”还能忍，但从实现上说是不安全也不够稳健的。
+[done] my_tokenizer.py (line 69) 用 eval() 解析词表文件内容。这对“自己完全信任的本地词表”还能忍，但从实现上说是不安全也不够稳健的。
 
 preprocess_data.py (line 20) 到 preprocess_data.py (line 35) 的 HFTokenizer 路径语义也有点乱。现在它用 vocab_file 充当 Hugging Face tokenizer/model path，而不是 tokenizer_model。再加上你本地那个 RWKV HF tokenizer 目录在当前环境里实际加载报错，所以 HFTokenizer 现在也不能算安全后备方案。
 
