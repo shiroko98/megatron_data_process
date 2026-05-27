@@ -753,12 +753,10 @@ def main():
 
 
 if __name__ == '__main__':
-    # main()
     start_time = time.time()
-    process_data("/mnt/data/Datas/SFT_Data/","/mnt/data/Datasets/sft_data/","RWKVTokenizer",vocab_file="/mnt/data/Codes/json2binidx_tool/rwkv_vocab_v20250609.txt", workers=1, max_processes=192)
-    # append_eod=True 是否应该改为False，如果是新的chat template的话
+    main()
     end_time = time.time()
-    elapsed_time = end_time - start_time  # 计算执行时间
+    elapsed_time = end_time - start_time
     print(f"The function took {elapsed_time} seconds to complete.")
 
 # 单文件单分布
