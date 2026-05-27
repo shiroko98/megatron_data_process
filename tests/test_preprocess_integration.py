@@ -17,9 +17,7 @@ HF_TOKENIZER_PATH = PROJECT_ROOT / "Qwen1.5-14B-Chat"
 def test_rwkv_tokenizer_uses_specified_vocab_file() -> None:
     tokenizer = RWKVTokenizer(str(RWKV_VOCAB), vocab_extra_ids=0)
 
-    pytest.xfail("RWKVTokenizer custom vocab wiring will be fixed in a dedicated task.")
     assert tokenizer.tokenizer.vocab_filepath == str(RWKV_VOCAB)
-    assert tokenizer.vocab_size == 65535
     assert tokenizer.tokenize("hello world")
 
 

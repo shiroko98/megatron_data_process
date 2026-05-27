@@ -52,8 +52,8 @@ def build_tokenizer(args):
 class RWKVTokenizer():
     """RWKV Tokenizer"""
     def __init__(self, vocab_file, vocab_extra_ids):
-        self.tokenizer = pyrwkv_tokenizer.RWKVTokenizer()
         self.vocab_file = vocab_file
+        self.tokenizer = pyrwkv_tokenizer.RWKVTokenizer(vocab_filepath=vocab_file)
         self.eod_id = 65532
 
         self._idx2token = {}
