@@ -6,7 +6,7 @@
 
 [done] preprocess_data.py (line 404) 的 manage_processes() 没检查子进程 exitcode。它只看进程是不是还活着，preprocess_data.py (line 416)，某个 partition 子进程如果异常退出，父进程不会报错中止，可能继续往下跑，最后变成“缺分片”或 merge 异常，属于会吞掉失败的真 bug。
 
-workers / partitions / max_processes 的实现语义和帮助文本不一致。preprocess_data.py (line 296) 说的是 workers * partitions = CPU cores，但实际代码是每个任务只开 workers // partitions 个 pool worker，preprocess_data.py (line 547)，然后外层再并发 max_processes 个任务，preprocess_data.py (line 409)。真实并发更接近 max_processes * (workers // partitions)，不是 help 里写的那个意思。
+[done] workers / partitions / max_processes 的实现语义和帮助文本不一致。preprocess_data.py (line 296) 说的是 workers * partitions = CPU cores，但实际代码是每个任务只开 workers // partitions 个 pool worker，preprocess_data.py (line 547)，然后外层再并发 max_processes 个任务，preprocess_data.py (line 409)。真实并发更接近 max_processes * (workers // partitions)，不是 help 里写的那个意思。
 
 多文件目录输入且 partitions=1 时，会明显过度并发。preprocess_data.py (line 467) 到 preprocess_data.py (line 486) 会把每个文件都当成一个外层任务；而 preprocess_data.py (line 548) 里 workers // partitions 此时就是 workers 本身。于是如果 max_processes=4, workers=16，就可能同时跑 4 个文件任务、每个任务 16 个 worker，总共约 64 个编码 worker。
 

@@ -301,12 +301,12 @@ def get_args():
     group = parser.add_argument_group(title='runtime')
     group.add_argument('--workers', type=int, required=True,
                        help=('Number of worker processes to launch.'
-                             'A good default for fast pre-processing '
-                             'is: (workers * partitions) = available CPU cores.'))
+                             'This is the total tokenizer-worker budget shared '
+                             'across concurrently running file tasks.'))
     group.add_argument('--partitions', type=int, default=1,
                         help='Number of file partitions')
     group.add_argument('--max-processes', type=int, default=6,
-                        help='Maximum number of file processes')
+                        help='Maximum number of concurrent file processes')
     group.add_argument('--merge-partitions', action='store_true',
                         help='Merge partition files into a single output.')
     group.add_argument('--log-interval', type=int, default=1000,
@@ -382,6 +382,13 @@ def check_files_exist(in_ss_out_names, key, num_partitions=None):
         if not os.path.exists(in_ss_out_names[i][key]):
             return False
     return True
+
+
+def resolve_runtime_process_settings(workers, max_processes, task_count):
+    task_count = max(1, task_count)
+    concurrent_file_processes = max(1, min(max_processes, task_count, workers))
+    workers_per_process = max(1, workers // concurrent_file_processes)
+    return concurrent_file_processes, workers_per_process
 
 def get_input_files(input_path):
     """根据输入路径返回文件列表，包括多层目录中的文件"""
@@ -665,12 +672,13 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
             for idx in range(args.partitions):
                 partitioned_input_files[idx].close()
 
-    # 首先，按照原来的思路，每个文件都会独立开一个进程，然后每个进程都会有args.workers//args.partitions子进程
-    # 也就意味着，一共有file_num * args.workers//args.partitions 个进程
-    # 如果args.partitions=1，则更大
-    # 所以现在指定文件的独立进程数，然后一共有max * args.workers//args.partitions 个进程
-    assert args.workers % args.partitions == 0
-    partition = Partition(args, args.workers//args.partitions) 
+    task_count = len(in_ss_out_names)
+    effective_max_processes, workers_per_process = resolve_runtime_process_settings(
+        args.workers,
+        args.max_processes,
+        task_count,
+    )
+    partition = Partition(args, workers_per_process)
 
     # check to see if paritions with split sentences already created
     split_sentences_present = check_files_exist(in_ss_out_names, 'sentence_split')
@@ -678,7 +686,7 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
     # split sentences in partition files
     if args.split_sentences and not split_sentences_present:
         task_args_list = [(name['partition'], name['sentence_split']) for name in in_ss_out_names]
-        manage_processes(partition.split_sentences, task_args_list, args.max_processes)
+        manage_processes(partition.split_sentences, task_args_list, effective_max_processes)
         # processes = []
         # for name in in_ss_out_names:
         #     p = multiprocessing.Process(target=partition.split_sentences,
@@ -696,7 +704,7 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
     # encode partition files in parallel
     input_key = 'sentence_split' if args.split_sentences else 'partition'
     task_args_list = [(name[input_key], name['output_prefix']) for name in in_ss_out_names]
-    manage_processes(partition.process_json_file, task_args_list, args.max_processes)
+    manage_processes(partition.process_json_file, task_args_list, effective_max_processes)
     # processes = []
     # input_key = 'sentence_split' if args.split_sentences else 'partition' 
     # for name in in_ss_out_names: # # 每个输入的文件都有一个独立的进程管理

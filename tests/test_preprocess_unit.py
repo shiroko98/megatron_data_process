@@ -140,6 +140,12 @@ def test_check_files_exist_defaults_to_checking_all_entries(tmp_path: Path):
     )
 
 
+def test_resolve_runtime_process_settings_caps_by_tasks_and_workers():
+    assert preprocess_data.resolve_runtime_process_settings(8, 4, 2) == (2, 4)
+    assert preprocess_data.resolve_runtime_process_settings(8, 4, 10) == (4, 2)
+    assert preprocess_data.resolve_runtime_process_settings(3, 6, 10) == (3, 1)
+
+
 def test_get_input_files_directory_is_recursive_and_unsorted_contract(multi_file_input_dir: Path):
     result = preprocess_data.get_input_files(str(multi_file_input_dir))
 
@@ -688,6 +694,39 @@ def test_process_data_warns_for_bert_without_sentence_split(monkeypatch, capsys,
 
     assert "Are you sure you don't want to split sentences?" in capsys.readouterr().out
     assert calls
+
+
+def test_process_data_uses_total_worker_budget_for_file_processes(monkeypatch, multi_file_input_dir: Path, tmp_path: Path):
+    captured = []
+
+    def fake_manage(task, args, max_processes):
+        captured.append((task.__name__, max_processes, list(args)))
+
+    monkeypatch.setattr(preprocess_data, "manage_processes", fake_manage)
+    partition_workers = []
+
+    class FakePartition:
+        def __init__(self, args, workers):
+            partition_workers.append(workers)
+            self.split_sentences = lambda *_: None
+            self.process_json_file = lambda *_: None
+
+    monkeypatch.setattr(preprocess_data, "Partition", FakePartition)
+
+    preprocess_data.process_data(
+        input=str(multi_file_input_dir),
+        output_prefix=str(tmp_path / "out"),
+        tokenizer_type="HFTokenizer",
+        vocab_file=str(PROJECT_ROOT / "Qwen1.5-14B-Chat"),
+        workers=8,
+        max_processes=4,
+        merge_partitions=False,
+    )
+
+    assert partition_workers == [4]
+    assert captured[0][0] == "<lambda>"
+    assert captured[0][1] == 2
+    assert len(captured[0][2]) == 2
 
 
 def test_process_data_requires_nltk_for_sentence_split(sample_jsonl: Path, tmp_path: Path, monkeypatch):
