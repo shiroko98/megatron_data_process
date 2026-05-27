@@ -1,0 +1,15 @@
+data/
+__pycache__/
+.pytest_cache/
+.vscode/
+error.log
+
+*.pyc
+*.pyo
+*.pyd
+
+*.bin
+*.idx
+*_ss.jsonl
+*_ss_*.jsonl
+temp_*.jsonl

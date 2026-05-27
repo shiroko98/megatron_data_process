@@ -1,0 +1,52 @@
+硬问题
+
+preprocess_data.py (line 31) 对 nltk 有导入期硬依赖。上面虽然 try/except 了 import nltk，preprocess_data.py (line 17) 到 preprocess_data.py (line 21)，但紧接着类定义 CustomLanguageVars(nltk.tokenize...) 还是会在 import 阶段直接引用 nltk。也就是说，哪怕你根本不用 split_sentences，只要没装 nltk，脚本本身就可能 import 失败。
+
+preprocess_data.py (line 755) 的 __main__ 入口已经坏了。现在不是跑 main()，而是写死调用了一次 process_data(...)，preprocess_data.py (line 758)。所以直接 python preprocess_data.py --input ... 这种 CLI 用法在当前版本下不安全，参数会被无视。
+
+preprocess_data.py (line 404) 的 manage_processes() 没检查子进程 exitcode。它只看进程是不是还活着，preprocess_data.py (line 416)，某个 partition 子进程如果异常退出，父进程不会报错中止，可能继续往下跑，最后变成“缺分片”或 merge 异常，属于会吞掉失败的真 bug。
+
+workers / partitions / max_processes 的实现语义和帮助文本不一致。preprocess_data.py (line 296) 说的是 workers * partitions = CPU cores，但实际代码是每个任务只开 workers // partitions 个 pool worker，preprocess_data.py (line 547)，然后外层再并发 max_processes 个任务，preprocess_data.py (line 409)。真实并发更接近 max_processes * (workers // partitions)，不是 help 里写的那个意思。
+
+多文件目录输入且 partitions=1 时，会明显过度并发。preprocess_data.py (line 467) 到 preprocess_data.py (line 486) 会把每个文件都当成一个外层任务；而 preprocess_data.py (line 548) 里 workers // partitions 此时就是 workers 本身。于是如果 max_processes=4, workers=16，就可能同时跑 4 个文件任务、每个任务 16 个 worker，总共约 64 个编码 worker。
+
+preprocess_data.py (line 341) 的 check_files_exist() 只检查前 num_partitions 个条目。partitions=1 且输入目录里有多个文件时，它只会检查第一个文件的 _ss / partition 状态。这样一来，第一份文件如果已有 _ss，后面的没有，它也会误判“split 已完成”，然后后续 encode 直接吃不存在的文件。
+
+preprocess_data.py (line 722) 里 main() 的提前返回条件也有问题。它只要看到 len(in_file_names) == 1 就直接 return，不看 partitions。这意味着“单个大文件 + partitions>1”走 main() 时，encode 完了也不会 merge 分片输出。虽然你当前 __main__ 没走 main()，但这仍然是个潜在逻辑 bug。
+
+兼容性和实现问题
+
+my_tokenizer.py (line 55) 的 RWKVTokenizer 封装没有把你传进来的 vocab_file 真正传给底层 tokenizer。它只是 rwkv_tokenizer.RWKVTokenizer() 空参初始化，然后本地再自己读一遍 vocab_file 到 _idx2token，my_tokenizer.py (line 61) 到 my_tokenizer.py (line 74)。我已经核过安装包本体，底层构造函数其实支持 vocab_filepath。所以当前实现存在“编码用的是包默认词表，元数据读的是你指定词表”的风险，这是最需要警惕的兼容性问题。
+
+my_tokenizer.py (line 77) 的 vocab_size 被硬编码成了 65529。它不是从 vocab_file 动态读出来的，也不是从底层 tokenizer 取的。如果你实际词表不是这个大小，就会出现 vocab 元信息和真实编码器不一致的问题。
+
+my_tokenizer.py (line 69) 用 eval() 解析词表文件内容。这对“自己完全信任的本地词表”还能忍，但从实现上说是不安全也不够稳健的。
+
+preprocess_data.py (line 20) 到 preprocess_data.py (line 35) 的 HFTokenizer 路径语义也有点乱。现在它用 vocab_file 充当 Hugging Face tokenizer/model path，而不是 tokenizer_model。再加上你本地那个 RWKV HF tokenizer 目录在当前环境里实际加载报错，所以 HFTokenizer 现在也不能算安全后备方案。
+
+preprocess_data.py (line 478) 和 preprocess_data.py (line 621) 用了 file_name.split('/')[-1] 取 basename。这在 Linux 下问题不大，但在 Windows 路径里分隔符是 \，会导致多文件目录输入时 output_prefix 取值不对，轻则名字怪，重则路径非法。
+
+preprocess_data.py (line 347) 的输入扫描只收 .jsonl，但后面分片读取时又写了 .gz 分支，preprocess_data.py (line 523)。也就是说，“支持 gzip”这件事在目录扫描入口上其实没真正打通，.jsonl.gz 不会被自动发现。
+
+preprocess_data.py (line 351) 的 os.walk() 没有排序，所以多文件输入时文件处理顺序不是严格确定的。这个会影响 partition 分配顺序、最终 merge 顺序，以及结果复现性。
+
+次要但值得记住的问题
+
+preprocess_data.py (line 77) 的 split() 用 data[key] 直接取字段，缺 key 会抛异常；而 encode() 用的是 data.get(key, "")，preprocess_data.py (line 98)。两个阶段的容错行为不一致。
+
+preprocess_data.py (line 214) 和 preprocess_data.py (line 52) 会重复初始化 tokenizer。父进程先建一次拿 vocab_size，子进程池 initializer 再每个 worker 建一次。这个不是 correctness bug，但会增加启动耗时和内存。
+
+preprocess_data.py (line 326) 的临时 partition 文件名是按 args.input 派生出来的。输入如果是目录，就会把 temp_0.jsonl 之类的中间文件直接写到源目录下面。源目录不可写时会失败，而且会污染源数据目录。
+
+preprocess_data.py (line 27) 的 error.log 是相对路径，落在哪个目录取决于你从哪里启动脚本，不太好追踪。
+
+preprocess_data.py (line 28) 的 MAX_PROCESSES = 5 现在是死代码，没被真正使用。
+
+如果按“必须先修”来排，我会把下面 6 个放第一优先级：
+
+__main__ 不走 main()
+manage_processes() 不检查子进程失败
+workers / partitions / max_processes 语义混乱
+check_files_exist() 在多文件 + partitions=1 下判断错误
+RWKVTokenizer 没把 vocab_file 传给底层编码器
+vocab_size 硬编码
