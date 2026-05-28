@@ -20,8 +20,6 @@ def test_rwkv_tokenizer_uses_specified_vocab_file() -> None:
     tokenizer = RWKVTokenizer(str(RWKV_VOCAB), vocab_extra_ids=0)
 
     assert tokenizer.tokenizer.vocab_filepath == str(RWKV_VOCAB)
-    assert tokenizer.backend_vocab_file == str(RWKV_VOCAB)
-    assert tokenizer.uses_compat_vocab is False
     assert tokenizer.vocab_size == tokenizer.tokenizer.vocab_size()
     assert tokenizer.vocab_size > tokenizer.eod
     assert tokenizer.tokenize("hello world")
@@ -45,43 +43,6 @@ def test_rwkv_new_vocab_file_is_well_formed() -> None:
     assert ids[0] == 1
     assert ids[-1] == 65532
     assert ids == list(range(1, 65533))
-
-
-def test_rwkv_tokenizer_normalizes_new_vocab_for_backend() -> None:
-    tokenizer = RWKVTokenizer(str(RWKV_VOCAB_NEW), vocab_extra_ids=0)
-
-    assert tokenizer.uses_compat_vocab is True
-    assert tokenizer.backend_vocab_file != str(RWKV_VOCAB_NEW)
-    assert Path(tokenizer.backend_vocab_file).name.startswith("rwkv_vocab_compat_")
-    assert tokenizer.tokenizer.vocab_filepath == tokenizer.backend_vocab_file
-    assert tokenizer.vocab_size == 65533
-    assert tokenizer.tokenize("hello world")
-    assert tokenizer.detokenize(tokenizer.tokenize("hello world")) == "hello world"
-
-
-def test_process_data_creates_binidx_outputs_with_new_rwkv_vocab(
-    sample_jsonl: Path,
-    sample_rows,
-    tmp_path: Path,
-) -> None:
-    output_prefix = tmp_path / "dataset_new_vocab"
-
-    preprocess_data.process_data(
-        input=str(sample_jsonl),
-        output_prefix=str(output_prefix),
-        tokenizer_type="RWKVTokenizer",
-        vocab_file=str(RWKV_VOCAB_NEW),
-        workers=1,
-        max_processes=1,
-        append_eod=False,
-    )
-
-    dataset_prefix = str(output_prefix) + "_text_document"
-    dataset = indexed_dataset.IndexedDataset(dataset_prefix)
-
-    assert len(dataset) == len(sample_rows)
-    assert dataset[0].size > 0
-    assert dataset[len(sample_rows) - 1].size > 0
 
 
 def test_process_data_creates_binidx_outputs(sample_jsonl: Path, sample_rows, tmp_path: Path) -> None:

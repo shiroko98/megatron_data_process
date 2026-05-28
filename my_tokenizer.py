@@ -1,9 +1,6 @@
 """Megatron tokenizers."""
 
 import ast
-import hashlib
-import os
-import tempfile
 from abc import ABC
 from abc import abstractmethod
 from megatron_tokenizer import MegatronTokenizer
@@ -65,29 +62,26 @@ class RWKVTokenizer():
     """RWKV Tokenizer"""
     def __init__(self, vocab_file, vocab_extra_ids):
         self.vocab_file = vocab_file
-        vocab_entries, needs_backend_compat = _load_rwkv_vocab_entries(vocab_file)
-        backend_vocab_file = _prepare_backend_compatible_rwkv_vocab_file(
-            vocab_file,
-            vocab_entries,
-            needs_backend_compat,
-        )
-
-        try:
-            self.tokenizer = pyrwkv_tokenizer.RWKVTokenizer(vocab_filepath=backend_vocab_file)
-        except BaseException as exc:
-            if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
-                raise
-            raise RuntimeError(
-                "Failed to initialize pyrwkv_tokenizer with vocab file "
-                f"{backend_vocab_file!r}. The vocab may use a backend-incompatible "
-                "literal format."
-            ) from exc
-
-        self.backend_vocab_file = backend_vocab_file
-        self.uses_compat_vocab = backend_vocab_file != os.path.abspath(vocab_file)
+        self.tokenizer = pyrwkv_tokenizer.RWKVTokenizer(vocab_filepath=vocab_file)
         self._vocab_size = self.tokenizer.vocab_size()
         self.eod_id = 65532
-        self._idx2token = {idx: token_bytes for idx, token_bytes in vocab_entries}
+
+        self._idx2token = {}
+
+        # 初始化时读取词汇表文件
+        self._load_vocab()
+
+    def _load_vocab(self):
+        """从文件中加载词汇表并创建索引到token和token到索引的映射"""
+        with open(self.vocab_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        for l in lines:
+            idx = int(l[:l.index(' ')])
+            x = _parse_rwkv_vocab_token(l[l.index(' '):l.rindex(' ')])
+            x = x.encode("utf-8") if isinstance(x, str) else x
+            assert isinstance(x, bytes)
+            assert len(x) == int(l[l.rindex(' '):])
+            self._idx2token[idx] = x
 
 
     @property
@@ -138,84 +132,6 @@ def _parse_rwkv_vocab_token(token_literal):
     if not isinstance(value, (str, bytes)):
         raise ValueError(f"Unsupported RWKV vocab token literal: {token_literal!r}")
     return value
-
-
-def _load_rwkv_vocab_entries(vocab_file):
-    entries = []
-    needs_backend_compat = False
-
-    with open(vocab_file, "r", encoding="utf-8") as handle:
-        for line in handle:
-            first_space = line.index(" ")
-            last_space = line.rindex(" ")
-            idx = int(line[:first_space])
-            token_literal = line[first_space:last_space].strip()
-            token = _parse_rwkv_vocab_token(token_literal)
-            token_bytes = token.encode("utf-8") if isinstance(token, str) else token
-            assert isinstance(token_bytes, bytes)
-            assert len(token_bytes) == int(line[last_space:])
-
-            if token_literal != _serialize_rwkv_vocab_token_for_backend(token_bytes):
-                needs_backend_compat = True
-
-            entries.append((idx, token_bytes))
-
-    return entries, needs_backend_compat
-
-
-def _serialize_rwkv_vocab_token_for_backend(token_bytes):
-    try:
-        decoded = token_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        decoded = None
-
-    if decoded is not None and decoded.encode("utf-8") == token_bytes:
-        return repr(decoded)
-
-    hex_bytes = "".join(f"\\x{byte:02x}" for byte in token_bytes)
-    return f"b'{hex_bytes}'"
-
-
-def _prepare_backend_compatible_rwkv_vocab_file(vocab_file, vocab_entries, needs_backend_compat):
-    source_vocab_path = os.path.abspath(vocab_file)
-    if not needs_backend_compat:
-        return source_vocab_path
-
-    digest = hashlib.sha256()
-    for idx, token_bytes in vocab_entries:
-        digest.update(f"{idx} ".encode("ascii"))
-        digest.update(token_bytes)
-        digest.update(b"\n")
-
-    cache_dir = os.path.dirname(os.path.abspath(__file__))
-    compat_vocab_path = os.path.join(
-        cache_dir,
-        f"rwkv_vocab_compat_{digest.hexdigest()[:16]}.txt",
-    )
-    if os.path.exists(compat_vocab_path):
-        return compat_vocab_path
-
-    lines = [
-        f"{idx} {_serialize_rwkv_vocab_token_for_backend(token_bytes)} {len(token_bytes)}"
-        for idx, token_bytes in vocab_entries
-    ]
-    fd, temp_path = tempfile.mkstemp(
-        prefix="rwkv_vocab_compat_",
-        suffix=".txt",
-        dir=cache_dir,
-        text=True,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write("\n".join(lines))
-            handle.write("\n")
-        os.replace(temp_path, compat_vocab_path)
-    except Exception:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        raise
-
-    return compat_vocab_path
 
 class _HFTokenizer(MegatronTokenizer):
     """_HFTokenizer for Hf Pretrained model loading."""
