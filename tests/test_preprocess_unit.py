@@ -146,13 +146,13 @@ def test_resolve_runtime_process_settings_caps_by_tasks_and_workers():
     assert preprocess_data.resolve_runtime_process_settings(3, 6, 10) == (3, 1)
 
 
-def test_get_input_files_directory_is_recursive_and_unsorted_contract(multi_file_input_dir: Path):
+def test_get_input_files_directory_is_recursive_and_sorted(multi_file_input_dir: Path):
     result = preprocess_data.get_input_files(str(multi_file_input_dir))
 
     assert len(result) == 2
     assert all(path.endswith(".jsonl") for path in result)
-    assert any(path.endswith("a.jsonl") for path in result)
-    assert any(path.endswith("b.jsonl") for path in result)
+    assert result[0].endswith("b.jsonl")
+    assert result[1].endswith("a.jsonl")
 
 
 def test_get_input_files_keeps_legitimate_jsonl_names(multi_file_input_dir: Path):
@@ -180,6 +180,14 @@ def test_get_input_files_rejects_missing_path():
 
 def test_get_input_files_rejects_non_jsonl_file(tmp_path: Path):
     path = tmp_path / "sample.txt"
+    path.write_text("noop", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not end with .jsonl"):
+        preprocess_data.get_input_files(str(path))
+
+
+def test_get_input_files_rejects_jsonl_gz_file(tmp_path: Path):
+    path = tmp_path / "sample.jsonl.gz"
     path.write_text("noop", encoding="utf-8")
 
     with pytest.raises(ValueError, match="does not end with .jsonl"):

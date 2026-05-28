@@ -9,7 +9,6 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),
                                              os.path.pardir)))
 import time
-import gzip
 import glob
 import traceback
 import torch
@@ -27,7 +26,6 @@ import indexed_dataset
 import logging
 
 logging.basicConfig(filename='error.log', level=logging.ERROR)
-MAX_PROCESSES = 5
 
 # https://stackoverflow.com/questions/33139531/preserve-empty-lines-with-nltks-punkt-tokenizer
 if nltk_available:
@@ -398,10 +396,12 @@ def get_input_files(input_path):
     if os.path.isdir(input_path):
         file_list = []
         for root, dirs, files in os.walk(input_path):
+            dirs.sort()
+            files.sort()
             for file in files:
                 if file.lower().endswith('.jsonl'):  # 使用endswith并忽略大小写
                     file_list.append(os.path.join(root, file))
-        return file_list
+        return sorted(file_list)
     elif os.path.isfile(input_path) and input_path.lower().endswith('.jsonl'):
         return [input_path]  # 确保单个文件也是.jsonl文件
     else:
@@ -652,11 +652,7 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
             index = 0
             if args.keep_sequential_samples: line_count = 0
             for in_file_name in in_file_names: # 父jsonl文件
-                # support for gzip files
-                if in_file_name.endswith(".gz"):
-                    fin = gzip.open(in_file_name, 'rt')
-                else:
-                    fin = open(in_file_name, 'r', encoding='utf-8') # 打开父jsonl文件
+                fin = open(in_file_name, 'r', encoding='utf-8') # 打开父jsonl文件
 
                 for line in fin:
                     partitioned_input_files[index].write(line) # 写入其中一个子partition文件
