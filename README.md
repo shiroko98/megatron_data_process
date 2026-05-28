@@ -513,6 +513,7 @@ python preprocess_data.py ^
 - 当前仓库只支持 `.jsonl`
 - `HFTokenizer` 现在推荐使用 `--tokenizer-model`
 - `HFTokenizer` 仍兼容旧的 `--vocab-file` 写法
+- `merge_partitions` 目前存在两套默认值：命令行 `--merge-partitions` 因为是 `store_true`，不写时默认为 `False`；但如果是 Python 代码直接调用 `process_data(...)`，函数签名默认值是 `True`
 - `rwkv_vocab_v20250609.txt` 对 `pyrwkv_tokenizer` 这条 RWKV 后端路径仍不兼容，但像 `Mobius-r6-chat-CHNtuned-12b-16k-v6_5-0609` 这种自定义 HF RWKV tokenizer 可以读取这类 `b'...'` 风格词表
 - CLI 参数里虽然还保留了部分历史 tokenizer 名称，但当前代码并没有完整实现这些分支
 - `check_binidx.py` 目前是调试脚本，不是正式文档化工具

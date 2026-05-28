@@ -44,6 +44,8 @@
 
 [done] preprocess_data.py (line 28) 的 MAX_PROCESSES = 5 现在是死代码，没被真正使用。
 
+[done] `process_data(..., merge_partitions=True)` 和 CLI `--merge-partitions` 的默认值当前并不一致。现在已确认实际行为：命令行不写 `--merge-partitions` 时不会 merge，多文件目录输入想合成一组总 binidx 需要显式传这个参数；但如果是 Python 代码直接调用 `process_data(...)`，默认会 merge。
+
 [done] rwkv_vocab_v20250609.txt 直接交给现有环境中的 pyrwkv_tokenizer 后端会触发 Rust panic。根因已经确认：上游后端不接受这份词表采用的全 `b'...'` 字面量风格。当前主线方案已切回兼容词表 `rwkv_vocab_v20230424.txt`，因此该问题作为历史兼容性记录保留，不再继续纳入当前仓库主线待办。
 
 如果按“必须先修”来排，我会把下面 6 个放第一优先级：
