@@ -25,7 +25,11 @@ from my_tokenizer import build_tokenizer
 import indexed_dataset
 import logging
 
-logging.basicConfig(filename='error.log', level=logging.ERROR)
+ERROR_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "error.log",
+)
+logging.basicConfig(filename=ERROR_LOG_PATH, level=logging.ERROR, encoding="utf-8")
 
 # https://stackoverflow.com/questions/33139531/preserve-empty-lines-with-nltks-punkt-tokenizer
 if nltk_available:
@@ -47,6 +51,13 @@ else:
 class IdentitySplitter(object):
     def tokenize(self, *text):
         return text #返回原text
+
+
+def _get_json_key_value(data, key):
+    value = data.get(key, "")
+    if value is None:
+        return ""
+    return value
 
 
 class Encoder(object):
@@ -82,7 +93,7 @@ class Encoder(object):
         data = json.loads(json_line)
         output = {}
         for key in self.args.json_keys:
-            text = data[key]
+            text = _get_json_key_value(data, key)
             max_len = 1000000
             tokens_list = [Encoder.splitter.tokenize(text[i:i+max_len]) for i in range(0, len(text), max_len)] # 没有tokenizer化，而只是处理长度，可能还会进行分句，但不会ID化（输出是[['《王的中殿之凤舞之阙》是连载于红袖添香网的网络小说，作者是流莫星。 都市言情。都市言情 他是朝鲜的王,她是他的妃,在一次的相遇他们在一起,意味可以这样幸福下去,没想到一次...他,从此他便的更冷酷。。。。。多年后,即时再相遇,俩人也成了陌生人。。。。。敬请关注']]）
             output[key] = [tokens for partial in tokens_list for tokens in partial] # 输出是{'text': ['《王的中殿之凤舞之阙》是连载于红袖添香网的网络小说，作者是流莫星。 都市言情。都市言情 他是朝鲜的王,她是他的妃,在一次的相遇他们在一起,意味可以这样幸福下去,没想到一次...他,从此他便的更冷酷。。。。。多年后,即时再相遇,俩人也成了陌生人。。。。。敬请关注']}
@@ -98,7 +109,7 @@ class Encoder(object):
         ids = {}
         lens = {}
         for key in self.args.json_keys:
-            text = data.get(key, "")
+            text = _get_json_key_value(data, key)
             if isinstance(text, list):
                 sentences = text
             else:
@@ -216,7 +227,7 @@ class Partition(object):
 
         startup_start = time.time()
         encoder = Encoder(self.args)
-        tokenizer = build_tokenizer(self.args)
+        tokenizer_vocab_size = get_tokenizer_vocab_size(self.args)
         pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
         encoded_docs = pool.imap(encoder.encode, fin, 32)
         pool.close()
@@ -236,7 +247,7 @@ class Partition(object):
                                                         key, level)
             builders[key] = indexed_dataset.IndexedDatasetBuilder(
                 output_bin_files[key],
-                dtype=indexed_dataset.DType.optimal_dtype(tokenizer.vocab_size),
+                dtype=indexed_dataset.DType.optimal_dtype(tokenizer_vocab_size),
             )
 
         startup_end = time.time()
@@ -281,9 +292,12 @@ def get_args():
                                 'NullTokenizer'],
                        help='What type of tokenizer to use.')
     group.add_argument('--tokenizer-model', type=str, default=None,
-                       help='YTTM tokenizer model.')
+                       help=('Tokenizer model/path. For HFTokenizer, this is '
+                             'the preferred Hugging Face tokenizer/model path.'))
     group.add_argument('--vocab-file', type=str, default=None,
-                       help='Path to the vocab file')
+                       help=('Path to the vocab file. RWKVTokenizer requires '
+                             'this; HFTokenizer accepts it as a backward-'
+                             'compatible fallback path.'))
     group.add_argument('--vocab-size', default=786,
                        help='size of vocab for use with NullTokenizer')
     group.add_argument('--merge-file', type=str, default=None,
@@ -388,6 +402,14 @@ def resolve_runtime_process_settings(workers, max_processes, task_count):
     workers_per_process = max(1, workers // concurrent_file_processes)
     return concurrent_file_processes, workers_per_process
 
+
+def get_tokenizer_vocab_size(args):
+    cached_vocab_size = getattr(args, "tokenizer_vocab_size", None)
+    if cached_vocab_size is None:
+        cached_vocab_size = build_tokenizer(args).vocab_size
+        args.tokenizer_vocab_size = cached_vocab_size
+    return cached_vocab_size
+
 def get_input_files(input_path):
     """根据输入路径返回文件列表，包括多层目录中的文件"""
     if not os.path.exists(input_path):
@@ -413,7 +435,7 @@ def merge_files(args, in_ss_out_names):
     output_bin_files = {}
     output_idx_files = {}
     builders = {}
-    tokenizer = build_tokenizer(args)
+    tokenizer_vocab_size = get_tokenizer_vocab_size(args)
 
     for key in args.json_keys:
         output_bin_files[key] = "{}_{}_{}.bin".format(args.output_prefix,
@@ -422,7 +444,7 @@ def merge_files(args, in_ss_out_names):
                                                       key, level)
         builders[key] = indexed_dataset.IndexedDatasetBuilder(
             output_bin_files[key],
-            dtype=indexed_dataset.DType.optimal_dtype(tokenizer.vocab_size),
+            dtype=indexed_dataset.DType.optimal_dtype(tokenizer_vocab_size),
             # dtype=np.uint16
         )
 
@@ -669,6 +691,8 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
                 partitioned_input_files[idx].close()
 
     task_count = len(in_ss_out_names)
+    if args.tokenizer_type.lower() in {"rwkvtokenizer", "hftokenizer"}:
+        get_tokenizer_vocab_size(args)
     effective_max_processes, workers_per_process = resolve_runtime_process_settings(
         args.workers,
         args.max_processes,

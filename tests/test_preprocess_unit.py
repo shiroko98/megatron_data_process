@@ -394,6 +394,47 @@ def test_encoder_split_serializes_sentences():
     assert processed > 0
 
 
+def test_get_json_key_value_defaults_missing_and_none_to_empty_string():
+    assert preprocess_data._get_json_key_value({}, "text") == ""
+    assert preprocess_data._get_json_key_value({"text": None}, "text") == ""
+    assert preprocess_data._get_json_key_value({"text": "value"}, "text") == "value"
+
+
+def test_encoder_split_handles_missing_json_key():
+    encoder = preprocess_data.Encoder(_build_args(json_keys=["text"]))
+
+    class FakeSplitter:
+        @staticmethod
+        def tokenize(text):
+            return [text]
+
+    preprocess_data.Encoder.splitter = FakeSplitter()
+
+    doc, processed = encoder.split(json.dumps({"other": "hello"}))
+
+    assert json.loads(doc) == {"text": []}
+    assert processed > 0
+
+
+def test_encoder_encode_treats_none_as_empty_text():
+    encoder = preprocess_data.Encoder(_build_args(append_eod=False))
+
+    class FakeTokenizer:
+        eod = 7
+
+        @staticmethod
+        def tokenize(text):
+            return [len(text)] if text else []
+
+    preprocess_data.Encoder.tokenizer = FakeTokenizer()
+
+    doc, lens, processed = encoder.encode(json.dumps({"text": None}))
+
+    assert doc["text"] == []
+    assert lens["text"] == []
+    assert processed > 0
+
+
 def test_run_from_args_delegates_to_process_data(monkeypatch, sample_jsonl: Path, tmp_path: Path):
     args = _build_args(
         input=str(sample_jsonl),
@@ -453,6 +494,11 @@ def test_get_args_sets_defaults_and_flags(monkeypatch):
     assert args.merge_partitions is True
     assert args.keep_empty is False
     assert args.vocab_extra_ids == 0
+
+
+def test_error_log_path_is_repo_anchored():
+    expected = PROJECT_ROOT / "error.log"
+    assert Path(preprocess_data.ERROR_LOG_PATH) == expected
 
 
 def test_get_args_prints_bert_warning(monkeypatch, capsys):
@@ -575,6 +621,78 @@ def test_partition_process_json_file_writes_builders_and_deletes_input(monkeypat
     assert ("add_document", f"{output_prefix}_text_sentence.bin", [1, 2], [2]) in builder_calls
     assert ("finalize", f"{output_prefix}_text_sentence.bin", f"{output_prefix}_text_sentence.idx") in builder_calls
     assert not input_path.exists()
+
+
+def test_partition_process_json_file_reuses_cached_vocab_size_without_rebuilding_parent_tokenizer(monkeypatch, tmp_path: Path):
+    args = _build_args(partitions=1, split_sentences=False, json_keys=["text"])
+    args.tokenizer_vocab_size = 64
+    partition = preprocess_data.Partition(args, workers=1)
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text('{"text":"a"}\n', encoding="utf-8")
+    output_prefix = str(tmp_path / "out")
+    build_calls = []
+    dtype_inputs = []
+
+    class FakeBuilder:
+        def __init__(self, path, dtype):
+            self.path = path
+            self.dtype = dtype
+
+        @staticmethod
+        def add_document(doc, lens):
+            return None
+
+        @staticmethod
+        def finalize(idx_path):
+            return None
+
+    class FakePool:
+        def __init__(self, workers, initializer=None):
+            if initializer is not None:
+                initializer()
+
+        @staticmethod
+        def imap(func, fin, chunk_size):
+            return iter([({"text": [1]}, {"text": [1]}, 3)])
+
+        @staticmethod
+        def close():
+            return None
+
+        @staticmethod
+        def join():
+            return None
+
+    class FakeTokenizer:
+        vocab_size = 999
+        eod = 0
+
+        @staticmethod
+        def tokenize(text):
+            return [1]
+
+    def fake_build_tokenizer(_):
+        build_calls.append("called")
+        return FakeTokenizer()
+
+    monkeypatch.setattr(preprocess_data, "build_tokenizer", fake_build_tokenizer)
+    monkeypatch.setattr(preprocess_data.multiprocessing, "Pool", FakePool)
+    monkeypatch.setattr(preprocess_data.indexed_dataset, "IndexedDatasetBuilder", FakeBuilder)
+    monkeypatch.setattr(
+        preprocess_data.indexed_dataset.DType,
+        "optimal_dtype",
+        lambda vocab_size: dtype_inputs.append(vocab_size) or "dtype",
+    )
+    monkeypatch.setattr(
+        preprocess_data.Encoder,
+        "initializer",
+        lambda self: setattr(preprocess_data.Encoder, "tokenizer", FakeTokenizer()),
+    )
+
+    partition.process_json_file((str(input_path), output_prefix))
+
+    assert len(build_calls) == 0
+    assert dtype_inputs == [64]
 
 
 def test_merge_files_merges_and_cleans_partitions(monkeypatch, tmp_path: Path):

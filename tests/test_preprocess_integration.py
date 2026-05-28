@@ -5,12 +5,14 @@ import pytest
 
 import indexed_dataset
 import preprocess_data
-from my_tokenizer import RWKVTokenizer
+import my_tokenizer
+from my_tokenizer import RWKVTokenizer, _parse_rwkv_vocab_token
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_EXE = Path(r"D:\anaconda\envs\model\python.exe")
 RWKV_VOCAB = PROJECT_ROOT / "rwkv_vocab_v20240530.txt"
+RWKV_VOCAB_NEW = PROJECT_ROOT / "rwkv_vocab_v20250609.txt"
 HF_TOKENIZER_PATH = PROJECT_ROOT / "Qwen1.5-14B-Chat"
 
 
@@ -21,6 +23,26 @@ def test_rwkv_tokenizer_uses_specified_vocab_file() -> None:
     assert tokenizer.vocab_size == tokenizer.tokenizer.vocab_size()
     assert tokenizer.vocab_size > tokenizer.eod
     assert tokenizer.tokenize("hello world")
+
+
+def test_rwkv_new_vocab_file_is_well_formed() -> None:
+    ids = []
+
+    with RWKV_VOCAB_NEW.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            first = line.index(" ")
+            last = line.rindex(" ")
+            idx = int(line[:first])
+            token = _parse_rwkv_vocab_token(line[first:last])
+            encoded = token.encode("utf-8") if isinstance(token, str) else token
+            declared_length = int(line[last:])
+
+            assert len(encoded) == declared_length
+            ids.append(idx)
+
+    assert ids[0] == 1
+    assert ids[-1] == 65532
+    assert ids == list(range(1, 65533))
 
 
 def test_process_data_creates_binidx_outputs(sample_jsonl: Path, sample_rows, tmp_path: Path) -> None:
@@ -82,7 +104,7 @@ def test_cli_entrypoint_honors_arguments(sample_jsonl: Path, tmp_path: Path) -> 
         str(output_prefix),
         "--tokenizer-type",
         "HFTokenizer",
-        "--vocab-file",
+        "--tokenizer-model",
         str(HF_TOKENIZER_PATH),
         "--workers",
         "2",
@@ -117,3 +139,119 @@ def test_manage_processes_raises_on_child_failure() -> None:
     assert "Child process failed while running" in message
     assert "RuntimeError: expected child failure" in message
     assert "Child traceback:" in message
+
+
+def test_build_tokenizer_hf_prefers_tokenizer_model(monkeypatch) -> None:
+    captured = {}
+    args = type(
+        "Args",
+        (),
+        {
+            "tokenizer_type": "HFTokenizer",
+            "tokenizer_model": str(HF_TOKENIZER_PATH),
+            "vocab_file": "legacy-fallback-path",
+            "vocab_extra_ids": 0,
+            "rank": 1,
+            "make_vocab_size_divisible_by": 128,
+            "tensor_model_parallel_size": 1,
+            "padded_vocab_size": None,
+        },
+    )()
+
+    class FakeHFTokenizer:
+        def __init__(self, tokenizer_name_or_path, vocab_extra_ids, **kwargs):
+            captured["path"] = tokenizer_name_or_path
+            captured["extra_ids"] = vocab_extra_ids
+            self.vocab_size = 32
+
+    monkeypatch.setattr(my_tokenizer, "_HFTokenizer", FakeHFTokenizer)
+
+    tokenizer = my_tokenizer.build_tokenizer(args)
+
+    assert isinstance(tokenizer, FakeHFTokenizer)
+    assert captured["path"] == str(HF_TOKENIZER_PATH)
+    assert captured["extra_ids"] == 0
+
+
+def test_build_tokenizer_hf_falls_back_to_vocab_file(monkeypatch) -> None:
+    captured = {}
+    args = type(
+        "Args",
+        (),
+        {
+            "tokenizer_type": "HFTokenizer",
+            "tokenizer_model": None,
+            "vocab_file": str(HF_TOKENIZER_PATH),
+            "vocab_extra_ids": 0,
+            "rank": 1,
+            "make_vocab_size_divisible_by": 128,
+            "tensor_model_parallel_size": 1,
+            "padded_vocab_size": None,
+        },
+    )()
+
+    class FakeHFTokenizer:
+        def __init__(self, tokenizer_name_or_path, vocab_extra_ids, **kwargs):
+            captured["path"] = tokenizer_name_or_path
+            self.vocab_size = 32
+
+    monkeypatch.setattr(my_tokenizer, "_HFTokenizer", FakeHFTokenizer)
+
+    my_tokenizer.build_tokenizer(args)
+
+    assert captured["path"] == str(HF_TOKENIZER_PATH)
+
+
+def test_build_tokenizer_hf_rejects_odd_tokenizer_kwargs() -> None:
+    args = type(
+        "Args",
+        (),
+        {
+            "tokenizer_type": "HFTokenizer",
+            "tokenizer_model": str(HF_TOKENIZER_PATH),
+            "vocab_file": None,
+            "tokenizer_kwargs": ["use_fast"],
+            "vocab_extra_ids": 0,
+            "rank": 1,
+            "make_vocab_size_divisible_by": 128,
+            "tensor_model_parallel_size": 1,
+            "padded_vocab_size": None,
+        },
+    )()
+
+    with pytest.raises(ValueError, match="entered in pairs"):
+        my_tokenizer.build_tokenizer(args)
+
+
+def test_build_tokenizer_hf_passes_tokenizer_kwargs(monkeypatch) -> None:
+    captured = {}
+    args = type(
+        "Args",
+        (),
+        {
+            "tokenizer_type": "HFTokenizer",
+            "tokenizer_model": str(HF_TOKENIZER_PATH),
+            "vocab_file": None,
+            "tokenizer_kwargs": ["use_fast", False, "revision", "main"],
+            "vocab_extra_ids": 0,
+            "rank": 1,
+            "make_vocab_size_divisible_by": 128,
+            "tensor_model_parallel_size": 1,
+            "padded_vocab_size": None,
+        },
+    )()
+
+    class FakeHFTokenizer:
+        def __init__(self, tokenizer_name_or_path, vocab_extra_ids, **kwargs):
+            captured["path"] = tokenizer_name_or_path
+            captured["extra_ids"] = vocab_extra_ids
+            captured["kwargs"] = kwargs
+            self.vocab_size = 32
+
+    monkeypatch.setattr(my_tokenizer, "_HFTokenizer", FakeHFTokenizer)
+
+    my_tokenizer.build_tokenizer(args)
+
+    assert captured["path"] == str(HF_TOKENIZER_PATH)
+    assert captured["extra_ids"] == 0
+    assert captured["kwargs"] == {"use_fast": False, "revision": "main"}

@@ -14,16 +14,21 @@ from transformers import AutoTokenizer
 def build_tokenizer(args):
     """Initialize tokenizer."""
 
-    if args.rank == 0:
-        print(' > building HFTokenizer tokenizer, '
-                'loading tokenizer from pre-trained model', flush=True)
-
     if args.tokenizer_type == "HFTokenizer":
-        if args.vocab_file is None:
-            raise ValueError("Missing tokenizer path while building Huggingface tokenizer.")
+        tokenizer_path = getattr(args, "tokenizer_model", None) or args.vocab_file
+        if tokenizer_path is None:
+            raise ValueError(
+                "Missing Hugging Face tokenizer path. Set --tokenizer-model "
+                "or provide --vocab-file as a backward-compatible fallback."
+            )
+
+        if args.rank == 0:
+            print(' > building HFTokenizer tokenizer, '
+                    'loading tokenizer from pre-trained model', flush=True)
 
         hf_tokenizer_kwargs = dict()
         if hasattr(args, "tokenizer_kwargs") and args.tokenizer_kwargs:
+            # Accept a flat [key, value, key, value] argument list.
             if len(args.tokenizer_kwargs) % 2 != 0:
                 raise ValueError("The token name and token value must be entered in pairs.")
 
@@ -32,12 +37,15 @@ def build_tokenizer(args):
                     args.tokenizer_kwargs[i + 1]
 
         tokenizer = _HFTokenizer(
-            args.vocab_file,
+            tokenizer_path,
             vocab_extra_ids=args.vocab_extra_ids,
             **hf_tokenizer_kwargs
         )
 
     elif args.tokenizer_type.lower() == "RWKVTokenizer".lower():
+        if args.rank == 0:
+            print(' > building RWKVTokenizer tokenizer, '
+                    'loading tokenizer from vocab file', flush=True)
         assert args.vocab_file is not None
         tokenizer = RWKVTokenizer(args.vocab_file, vocab_extra_ids=args.vocab_extra_ids)
 
