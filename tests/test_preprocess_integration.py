@@ -14,6 +14,7 @@ PYTHON_EXE = Path(r"D:\anaconda\envs\model\python.exe")
 RWKV_VOCAB = PROJECT_ROOT / "rwkv_vocab_v20240530.txt"
 RWKV_VOCAB_NEW = PROJECT_ROOT / "rwkv_vocab_v20250609.txt"
 HF_TOKENIZER_PATH = PROJECT_ROOT / "Qwen1.5-14B-Chat"
+MOBIUS_HF_TOKENIZER_PATH = PROJECT_ROOT / "Mobius-r6-chat-CHNtuned-12b-16k-v6_5-0609"
 
 
 def test_rwkv_tokenizer_uses_specified_vocab_file() -> None:
@@ -91,6 +92,16 @@ def test_process_data_merges_single_file_partitions_with_hf_tokenizer(
     assert len(dataset) == len(sample_rows)
     assert (tmp_path / "partitioned_text_document.bin").exists()
     assert (tmp_path / "partitioned_text_document.idx").exists()
+
+
+def test_mobius_hf_tokenizer_loads_with_custom_code() -> None:
+    tokenizer = my_tokenizer._HFTokenizer(str(MOBIUS_HF_TOKENIZER_PATH), vocab_extra_ids=0)
+
+    token_ids = tokenizer.tokenizer.encode("hello world", add_special_tokens=False)
+
+    assert type(tokenizer.tokenizer).__name__ == "RWKVWorldTokenizer"
+    assert token_ids
+    assert tokenizer.tokenizer.decode(token_ids) == "hello world"
 
 
 def test_cli_entrypoint_honors_arguments(sample_jsonl: Path, tmp_path: Path) -> None:
