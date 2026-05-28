@@ -44,7 +44,7 @@
 
 [done] preprocess_data.py (line 28) 的 MAX_PROCESSES = 5 现在是死代码，没被真正使用。
 
-rwkv_vocab_v20250609.txt 当前虽然格式在 Python 层面可解析，但直接交给现有环境中的 pyrwkv_tokenizer 后端会触发 Rust panic。这个问题独立于本仓库 wrapper 逻辑，需要确认是词表字面量格式、词表内容约束，还是后端版本兼容性问题。
+[done] rwkv_vocab_v20250609.txt 当前虽然格式在 Python 层面可解析，但直接交给现有环境中的 pyrwkv_tokenizer 后端会触发 Rust panic。根因已经确认：rwkv-tokenizer 后端只接受“UTF-8 可解码 token 用字符串字面量、原始字节 token 用全十六进制 bytes literal”的词表格式。现在已在 wrapper 中加入自动规范化逻辑，必要时先生成兼容词表再交给后端。
 
 如果按“必须先修”来排，我会把下面 6 个放第一优先级：
 

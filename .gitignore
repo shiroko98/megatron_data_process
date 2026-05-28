@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .vscode/
 error.log
+rwkv_vocab_compat_*.txt
 
 *.pyc
 *.pyo

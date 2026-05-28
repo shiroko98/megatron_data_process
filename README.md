@@ -159,8 +159,8 @@ RWKV 使用的是“词表文件”。
 
 其中：
 
-- `rwkv_vocab_v20240530.txt` 是当前测试覆盖过、可直接拿来跑这套脚本的默认示例词表
-- `rwkv_vocab_v20250609.txt` 是候选新词表，但在当前环境的 `pyrwkv_tokenizer` 后端下仍需要额外兼容性确认
+- `rwkv_vocab_v20240530.txt` 是当前测试覆盖过的示例词表
+- `rwkv_vocab_v20250609.txt` 也已经可以直接使用；当前仓库会在需要时自动把它规范化成 `pyrwkv_tokenizer` 后端真正接受的词表字面量格式
 
 推荐用法示例：
 
@@ -169,7 +169,7 @@ python preprocess_data.py ^
   --input data\train-00000-of-00048-ab2b35705f029d94.parquet.jsonl ^
   --output-prefix data\minipile ^
   --tokenizer-type RWKVTokenizer ^
-  --vocab-file rwkv_vocab_v20240530.txt ^
+  --vocab-file rwkv_vocab_v20250609.txt ^
   --workers 6 ^
   --max-processes 2 ^
   --append-eod
@@ -278,6 +278,44 @@ python preprocess_data.py ^
 现在仍然兼容，但不再是推荐写法。
 
 
+## RWKV 词表兼容性
+
+这次排查里还确认了一个很重要的实现细节：
+
+- `pyrwkv_tokenizer` / `rwkv-tokenizer` 底层并不是“接受任意 Python 风格的 bytes literal”
+- 它对 vocab 文件的字面量格式有自己的硬约束
+
+它真正接受的格式是：
+
+- 能正常按 UTF-8 解码的 token，应该写成普通字符串字面量
+  - 例如：`'Simple'`
+  - 例如：`'<|im_start|>'`
+- 只有不能正常按 UTF-8 解码的原始字节 token，才应该写成 bytes 字面量
+  - 而且 bytes 字面量需要写成全十六进制 escape 形式
+  - 例如：`b'\x80'`
+  - 例如：`b'\xe2\x80'`
+
+像下面这种写法虽然对 Python 自己是合法的：
+
+- `b'Simple'`
+- `b'|'`
+- `b'<|im_start|>'`
+
+但对 `pyrwkv_tokenizer` 后端并不是兼容格式。
+
+为了解决这个问题，当前仓库在加载 RWKV 词表时会：
+
+1. 先按 Python 语义解析词表
+2. 检查字面量是否已经符合后端要求
+3. 如果不符合，就自动生成一个 `rwkv_vocab_compat_*.txt` 兼容词表
+4. 再把这个兼容词表交给 `pyrwkv_tokenizer`
+
+所以：
+
+- 旧词表会直接走原文件
+- 新词表如果用了“全 `b'...'`”风格，也能自动转成底层可接受格式
+
+
 ## 使用示例
 
 ### 1. 最常见：RWKV 处理单个文件
@@ -287,7 +325,7 @@ python preprocess_data.py ^
   --input data\train-00000-of-00048-ab2b35705f029d94.parquet.jsonl ^
   --output-prefix data\rwkv_train ^
   --tokenizer-type RWKVTokenizer ^
-  --vocab-file rwkv_vocab_v20240530.txt ^
+  --vocab-file rwkv_vocab_v20250609.txt ^
   --json-keys text ^
   --workers 6 ^
   --max-processes 2 ^
@@ -306,7 +344,7 @@ python preprocess_data.py ^
   --input data ^
   --output-prefix data\merged ^
   --tokenizer-type RWKVTokenizer ^
-  --vocab-file rwkv_vocab_v20240530.txt ^
+  --vocab-file rwkv_vocab_v20250609.txt ^
   --workers 6 ^
   --max-processes 2
 ```
@@ -324,7 +362,7 @@ python preprocess_data.py ^
   --input data\train-00000-of-00048-ab2b35705f029d94.parquet.jsonl ^
   --output-prefix data\partitioned ^
   --tokenizer-type RWKVTokenizer ^
-  --vocab-file rwkv_vocab_v20240530.txt ^
+  --vocab-file rwkv_vocab_v20250609.txt ^
   --workers 8 ^
   --max-processes 2 ^
   --partitions 4 ^
@@ -341,7 +379,7 @@ python preprocess_data.py ^
   --input data\train-00000-of-00048-ab2b35705f029d94.parquet.jsonl ^
   --output-prefix data\partitioned_seq ^
   --tokenizer-type RWKVTokenizer ^
-  --vocab-file rwkv_vocab_v20240530.txt ^
+  --vocab-file rwkv_vocab_v20250609.txt ^
   --workers 8 ^
   --max-processes 2 ^
   --partitions 4 ^
@@ -487,7 +525,7 @@ python preprocess_data.py ^
   --input data ^
   --output-prefix data\rwkv_dataset ^
   --tokenizer-type RWKVTokenizer ^
-  --vocab-file rwkv_vocab_v20240530.txt ^
+  --vocab-file rwkv_vocab_v20250609.txt ^
   --json-keys text ^
   --workers 8 ^
   --max-processes 2 ^
@@ -502,7 +540,7 @@ python preprocess_data.py ^
 - 当前仓库只支持 `.jsonl`
 - `HFTokenizer` 现在推荐使用 `--tokenizer-model`
 - `HFTokenizer` 仍兼容旧的 `--vocab-file` 写法
-- `rwkv_vocab_v20250609.txt` 当前已纳入仓库，但在现有 `pyrwkv_tokenizer` 后端上还没有通过直接加载验证
+- RWKV 词表如果字面量格式不符合 `pyrwkv_tokenizer` 的预期，当前仓库会自动生成兼容词表再交给后端
 - CLI 参数里虽然还保留了部分历史 tokenizer 名称，但当前代码并没有完整实现这些分支
 - `check_binidx.py` 目前是调试脚本，不是正式文档化工具
 
