@@ -303,7 +303,8 @@ class _IndexReader(object):
         """Clean up the object
         """
         if hasattr(self, "bin_buffer_mmap"):
-            self.bin_buffer_mmap._mmap.close()
+            # NumPy views may outlive this reader. The memmap owns its mapping
+            # and closes it when the last view releases it.
             del self.bin_buffer_mmap
 
     def __len__(self) -> int:
@@ -376,7 +377,7 @@ class IndexedDataset(torch.utils.data.Dataset):
         self.index = _IndexReader(idx_path, self.multimodal)
         self.bin_buffer = None
         self.bin_buffer_mmap = None
-        if mmap:
+        if mmap and os.path.getsize(bin_path) > 0:
             self.bin_buffer_mmap = numpy.memmap(bin_path, mode="r", order="C")
             self.bin_buffer = memoryview(self.bin_buffer_mmap)
 
@@ -400,10 +401,9 @@ class IndexedDataset(torch.utils.data.Dataset):
     def __del__(self) -> None:
         """Clean up the object
         """
-        if self.bin_buffer_mmap is not None:
-            self.bin_buffer_mmap._mmap.close()
-        del self.bin_buffer_mmap
-        del self.index
+        # Do not force-close mmap while returned NumPy views still reference it.
+        # Normal reference counting releases it after the final view disappears.
+        pass
 
     def __len__(self) -> int:
         """Return the length of the dataset i.e. the number of sequences in the index
@@ -652,11 +652,15 @@ class IndexedDatasetBuilder(object):
             modes (Optional[List[int]], optional): The modes for each item in the document. Defaults to None.
         """
         np_array = numpy.array(tensor, dtype=self.dtype)
+        if np_array.ndim != 1 or any(length < 0 for length in lengths) or sum(lengths) != np_array.size:
+            raise ValueError("Document lengths must describe exactly all tokens")
+        if self.multimodal and modes is not None and len(modes) != len(lengths):
+            raise ValueError("Provide one mode per sequence")
         self.data_file.write(np_array.tobytes(order="C"))
         self.sequence_lengths.extend(lengths)
         self.document_indices.append(len(self.sequence_lengths))
         if self.multimodal:
-            self.sequence_modes.extend(modes if modes is not None else [0] * lengths)
+            self.sequence_modes.extend(modes if modes is not None else [0] * len(lengths))
 
     def end_document(self) -> None:
         """Finalize the document, for use with IndexedDatasetBuilder.add_item

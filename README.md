@@ -1,5 +1,40 @@
 # megatron_data_process
 
+## 2026-10-13：Linux 并发处理修复与 Qwen tokenizer 验证
+
+使用 `process_data` 环境的 Python 3.10、Transformers 4.37.1、Tokenizers 0.15.1 实测，可加载 `/hikscale/models/Qwen/Qwen3.8-27B` 的 Qwen2TokenizerFast，无需升级该环境。
+
+Linux 命令示例（输入必须为原始文本 JSONL，输出使用新的前缀）：
+
+```bash
+source /mnt/data/anaconda3/etc/profile.d/conda.sh
+conda activate process_data
+cd /mnt/data/Codes/RWKV/megatron_data_process
+python preprocess_data.py \
+  --input /path/to/raw-jsonl \
+  --output-prefix /path/to/new-output/qwen \
+  --tokenizer-type HFTokenizer \
+  --tokenizer-model /hikscale/models/Qwen/Qwen3.8-27B \
+  --workers 8 \
+  --max-processes 2 \
+  --partitions 2 \
+  --keep-sequential-samples \
+  --merge-partitions \
+  --append-eod
+```
+
+- Qwen token ID 最高为 248076，数据自动使用 `int32`。`--append-eod` 每篇非空文档追加 ID 248046，即 `<|im_end|>`；这不会自动套用聊天模板。已预先添加结束 token 的数据可省略该选项。
+- `--workers` 是 tokenizer worker 总预算，`--max-processes` 是同时处理的文件/分片数。例如 8 / 2 对应两个文件任务，每个任务四个 tokenizer worker，另有文件任务自身的协调进程。
+- 目录中同名 JSONL 的输出会加上根据相对路径计算的短哈希，避免互相覆盖。正常的不重名文件沿用旧输出命名。
+- 已存在 `.bin` 或 `.idx` 时拒绝覆盖，改用新的输出前缀。全部字段编码和索引成功后才发布输出；合并失败保留所有原分片。源 JSONL 不删除，成功后只清理本次中间文件和已合并分片。不要用同一输出前缀同时启动两个任务。
+- 每次从当前输入重新生成分片和分句结果，不再仅凭旧临时文件存在就跳过。输入目录中的本任务中间目录不参与递归扫描。顺序分片支持空文件和分片数大于样本数。
+- tokenizer 初始化错误会返回主进程；失败会停止相关 worker。HF 内部线程并发关闭，外层进程负责并行。排队文档数量受限，避免慢磁盘造成无界结果积压；尚未做大语料吞吐基准，不能宣称具体提速比例。
+- HF 词表大小按最高 ID + 1 计算，兼容 ID 不连续的词表；不再强制依赖 `pyrwkv_tokenizer` 才能使用 HF tokenizer。
+- RWKV 的 EOD 不再写死为 65532：优先读取词表里的 `<|endoftext|>`，否则 `<|im_end|>`，两者均无时使用经典 RWKV 的保留 EOS ID 0。仓库 20240530 词表的 65532 是 `<|assistant|>`，现在正确使用 65535；20250609 词表仍使用 65532。使用旧词表重新处理且开启 `--append-eod` 时，结果会因此改变；已有数据文件未修改。
+- IndexedDataset 返回的 NumPy 数组可以安全保留到数据集对象释放以后；空 `.bin` 可正常读取；文档长度不匹配时拒绝写入，避免损坏索引。默认多模态序列标记也已修复。
+
+回归测试入口：`python -m pytest -q`。CLI 测试使用当前 Python，路径断言支持 Linux 和 Windows。
+
 一个用于将 `.jsonl` 语料批量转换为 Megatron 风格 `.bin/.idx` 数据集的脚本仓库。
 
 当前仓库的主要目标是：

@@ -59,8 +59,8 @@ def test_get_file_name_for_directory_input():
 
     result = preprocess_data.get_file_name(args, 2)
 
-    assert result["partition"].endswith("out_intermediate\\temp_2.jsonl")
-    assert result["sentence_split"].endswith("out_intermediate\\temp_ss_2.jsonl")
+    assert result["partition"].replace("\\", "/").endswith("out_intermediate/temp_2.jsonl")
+    assert result["sentence_split"].replace("\\", "/").endswith("out_intermediate/temp_ss_2.jsonl")
     assert result["output_prefix"] == "out_2"
 
 
@@ -74,7 +74,7 @@ def test_get_sentence_split_file_for_directory_input_preserves_relative_structur
 
     result = preprocess_data.get_sentence_split_file(args, str(source))
 
-    assert result.endswith("out_intermediate\\nested\\article_ss.jsonl")
+    assert result.replace("\\", "/").endswith("out_intermediate/nested/article_ss.jsonl")
     assert Path(result).parent.exists()
 
 
@@ -85,7 +85,7 @@ def test_get_sentence_split_file_for_single_file_input_uses_intermediate_dir(tmp
 
     result = preprocess_data.get_sentence_split_file(args, str(source))
 
-    assert result.endswith("out_intermediate\\article_ss.jsonl")
+    assert result.replace("\\", "/").endswith("out_intermediate/article_ss.jsonl")
     assert Path(result).parent.exists()
 
 
@@ -357,7 +357,7 @@ def test_encoder_initializer_requires_nltk_when_splitting(monkeypatch):
     monkeypatch.setattr(preprocess_data, "nltk_available", False)
     monkeypatch.setattr(builtins, "exit", lambda: (_ for _ in ()).throw(SystemExit()))
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(RuntimeError, match="NLTK"):
         encoder.initializer()
 
 
@@ -562,137 +562,44 @@ def test_partition_split_sentences_writes_output_and_removes_input(monkeypatch, 
     assert output_path.read_text(encoding="utf-8").strip() == '{"text": ["A"]}'
 
 
-def test_partition_process_json_file_writes_builders_and_deletes_input(monkeypatch, tmp_path: Path):
-    args = _build_args(partitions=2, split_sentences=True, json_keys=["text"])
-    partition = preprocess_data.Partition(args, workers=1)
+def test_partition_process_json_file_writes_builders_and_deletes_input(monkeypatch, tmp_path):
+    args = _build_args(partitions=2, split_sentences=True, tokenizer_vocab_size=64,
+                       append_eod=False)
     input_path = tmp_path / "input.jsonl"
-    input_path.write_text('{"text":"a"}\n{"text":"b"}\n', encoding="utf-8")
-    output_prefix = str(tmp_path / "out")
-    builder_calls = []
-
-    class FakeBuilder:
-        def __init__(self, path, dtype):
-            self.path = path
-            self.dtype = dtype
-
-        def add_document(self, doc, lens):
-            builder_calls.append(("add_document", self.path, list(doc), list(lens)))
-
-        def finalize(self, idx_path):
-            builder_calls.append(("finalize", self.path, idx_path))
-
-    class FakePool:
-        def __init__(self, workers, initializer=None):
-            if initializer is not None:
-                initializer()
-
-        @staticmethod
-        def imap(func, fin, chunk_size):
-            return iter([
-                ({"text": [1, 2]}, {"text": [2]}, 10),
-                (None, None, 5),
-            ])
-
-        @staticmethod
-        def close():
-            return None
-
-        @staticmethod
-        def join():
-            return None
-
-    class FakeTokenizer:
-        vocab_size = 32
-        eod = 0
-
-        @staticmethod
-        def tokenize(text):
-            return [len(text)] if text else []
-
-    monkeypatch.setattr(preprocess_data, "build_tokenizer", lambda _: FakeTokenizer())
-    monkeypatch.setattr(preprocess_data.multiprocessing, "Pool", FakePool)
-    monkeypatch.setattr(preprocess_data.indexed_dataset, "IndexedDatasetBuilder", FakeBuilder)
-    monkeypatch.setattr(preprocess_data.indexed_dataset.DType, "optimal_dtype", lambda _: "dtype")
-    monkeypatch.setattr(preprocess_data.Encoder, "initializer", lambda self: setattr(preprocess_data.Encoder, "tokenizer", FakeTokenizer()))
-    monkeypatch.setattr(preprocess_data.Encoder, "splitter", preprocess_data.IdentitySplitter())
-
-    partition.process_json_file((str(input_path), output_prefix))
-
-    assert ("add_document", f"{output_prefix}_text_sentence.bin", [1, 2], [2]) in builder_calls
-    assert ("finalize", f"{output_prefix}_text_sentence.bin", f"{output_prefix}_text_sentence.idx") in builder_calls
+    input_path.write_text('{"text":"a"}\n{bad json\n', encoding="utf-8")
+    monkeypatch.setattr(preprocess_data.Encoder, "initializer",
+                        lambda self: setattr(preprocess_data.Encoder, "tokenizer", FakeTokenIds()))
+    prefix = str(tmp_path / "out")
+    preprocess_data.Partition(args, 1).process_json_file((str(input_path), prefix))
+    data = indexed_dataset.IndexedDataset(prefix + "_text_sentence")
+    assert data[0].tolist() == [1]
+    assert len(data) == 1
     assert not input_path.exists()
 
 
-def test_partition_process_json_file_reuses_cached_vocab_size_without_rebuilding_parent_tokenizer(monkeypatch, tmp_path: Path):
-    args = _build_args(partitions=1, split_sentences=False, json_keys=["text"])
-    args.tokenizer_vocab_size = 64
-    partition = preprocess_data.Partition(args, workers=1)
-    input_path = tmp_path / "input.jsonl"
-    input_path.write_text('{"text":"a"}\n', encoding="utf-8")
-    output_prefix = str(tmp_path / "out")
-    build_calls = []
-    dtype_inputs = []
+class FakeTokenIds:
+    vocab_size = 64
+    eod = 0
 
-    class FakeBuilder:
-        def __init__(self, path, dtype):
-            self.path = path
-            self.dtype = dtype
+    @staticmethod
+    def tokenize(text):
+        return [len(text)] if text else []
 
-        @staticmethod
-        def add_document(doc, lens):
-            return None
 
-        @staticmethod
-        def finalize(idx_path):
-            return None
-
-    class FakePool:
-        def __init__(self, workers, initializer=None):
-            if initializer is not None:
-                initializer()
-
-        @staticmethod
-        def imap(func, fin, chunk_size):
-            return iter([({"text": [1]}, {"text": [1]}, 3)])
-
-        @staticmethod
-        def close():
-            return None
-
-        @staticmethod
-        def join():
-            return None
-
-    class FakeTokenizer:
-        vocab_size = 999
-        eod = 0
-
-        @staticmethod
-        def tokenize(text):
-            return [1]
-
-    def fake_build_tokenizer(_):
-        build_calls.append("called")
-        return FakeTokenizer()
-
-    monkeypatch.setattr(preprocess_data, "build_tokenizer", fake_build_tokenizer)
-    monkeypatch.setattr(preprocess_data.multiprocessing, "Pool", FakePool)
-    monkeypatch.setattr(preprocess_data.indexed_dataset, "IndexedDatasetBuilder", FakeBuilder)
-    monkeypatch.setattr(
-        preprocess_data.indexed_dataset.DType,
-        "optimal_dtype",
-        lambda vocab_size: dtype_inputs.append(vocab_size) or "dtype",
-    )
-    monkeypatch.setattr(
-        preprocess_data.Encoder,
-        "initializer",
-        lambda self: setattr(preprocess_data.Encoder, "tokenizer", FakeTokenizer()),
-    )
-
-    partition.process_json_file((str(input_path), output_prefix))
-
-    assert len(build_calls) == 0
-    assert dtype_inputs == [64]
+def test_partition_process_json_file_reuses_cached_vocab_size_without_rebuilding_parent_tokenizer(monkeypatch, tmp_path):
+    args = _build_args(tokenizer_vocab_size=64, append_eod=False)
+    source = tmp_path / "input.jsonl"
+    source.write_text('{"text":"a"}\n', encoding="utf-8")
+    def fail_build(_):
+        raise AssertionError("Parent must reuse cached vocab size")
+    monkeypatch.setattr(preprocess_data, "build_tokenizer", fail_build)
+    monkeypatch.setattr(preprocess_data.Encoder, "initializer",
+                        lambda self: setattr(preprocess_data.Encoder, "tokenizer", FakeTokenIds()))
+    prefix = str(tmp_path / "out")
+    preprocess_data.Partition(args, 1).process_json_file((str(source), prefix))
+    data = indexed_dataset.IndexedDataset(prefix + "_text_document")
+    assert data[0].tolist() == [1]
+    assert source.exists()
 
 
 def test_merge_files_merges_and_cleans_partitions(monkeypatch, tmp_path: Path):
@@ -728,38 +635,21 @@ def test_merge_files_merges_and_cleans_partitions(monkeypatch, tmp_path: Path):
     assert not Path(part2 + ".idx").exists()
 
 
-def test_merge_files_ignores_missing_cleanup_files(monkeypatch, tmp_path: Path, capsys):
-    args = _build_args(output_prefix=str(tmp_path / "merged"), json_keys=["text"])
-
-    class FakeBuilder:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        @staticmethod
-        def add_index(path_prefix):
-            return None
-
-        @staticmethod
-        def finalize(idx_path):
-            return None
-
-    class FakeTokenizer:
-        vocab_size = 32
-
-    removals = []
-
-    def fake_remove(path):
-        removals.append(path)
-        raise FileNotFoundError(path)
-
-    monkeypatch.setattr(preprocess_data, "build_tokenizer", lambda _: FakeTokenizer())
-    monkeypatch.setattr(preprocess_data.indexed_dataset, "IndexedDatasetBuilder", FakeBuilder)
-    monkeypatch.setattr(preprocess_data.os.path, "exists", lambda _: True)
-    monkeypatch.setattr(preprocess_data.os, "remove", fake_remove)
-
+def test_merge_files_ignores_missing_cleanup_files(monkeypatch, tmp_path, capsys):
+    part = str(tmp_path / "part1_text_document")
+    builder = indexed_dataset.IndexedDatasetBuilder(part + ".bin", dtype=np.uint16)
+    builder.add_document([1], [1])
+    builder.finalize(part + ".idx")
+    args = _build_args(output_prefix=str(tmp_path / "merged"), tokenizer_vocab_size=64)
+    original_remove = preprocess_data.os.remove
+    def race_remove(path, *a, **kw):
+        original_remove(path, *a, **kw)
+        if str(path) == part + ".bin":
+            raise FileNotFoundError(path)
+    monkeypatch.setattr(preprocess_data.os, "remove", race_remove)
     preprocess_data.merge_files(args, [{"output_prefix": str(tmp_path / "part1")}])
-
-    assert removals
+    data = indexed_dataset.IndexedDataset(args.output_prefix + "_text_document")
+    assert data[0].tolist() == [1]
     assert "Error deleting files" in capsys.readouterr().out
 
 
@@ -979,7 +869,7 @@ def test_process_data_calls_split_then_encode_when_requested(monkeypatch, sample
     assert calls[0][0] == "split_sentences"
     assert calls[1][0] == "process_json_file"
     split_args = calls[0][1]
-    assert split_args[0][1].endswith("out_intermediate\\sample_ss.jsonl")
+    assert split_args[0][1].replace("\\", "/").endswith("out_intermediate/sample_ss.jsonl")
 
 
 def test_process_data_multi_file_partitions_one_rechecks_all_sentence_split_outputs(
@@ -1019,8 +909,8 @@ def test_process_data_multi_file_partitions_one_rechecks_all_sentence_split_outp
 
     assert calls[0][0] == "split_sentences"
     assert len(calls[0][1]) == 2
-    assert any(task[1].endswith("out_intermediate\\b_ss.jsonl") for task in calls[0][1])
-    assert any(task[1].endswith("out_intermediate\\nested\\a_ss.jsonl") for task in calls[0][1])
+    assert any(task[1].replace("\\", "/").endswith("out_intermediate/b_ss.jsonl") for task in calls[0][1])
+    assert any(task[1].replace("\\", "/").endswith("out_intermediate/nested/a_ss.jsonl") for task in calls[0][1])
     assert calls[1][0] == "process_json_file"
 
 

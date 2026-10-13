@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ from my_tokenizer import RWKVTokenizer, _parse_rwkv_vocab_token
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PYTHON_EXE = Path(r"D:\anaconda\envs\model\python.exe")
+PYTHON_EXE = Path(sys.executable)
 RWKV_VOCAB = PROJECT_ROOT / "rwkv_vocab_v20240530.txt"
 RWKV_VOCAB_NEW = PROJECT_ROOT / "rwkv_vocab_v20250609.txt"
 HF_TOKENIZER_PATH = PROJECT_ROOT / "Qwen1.5-14B-Chat"

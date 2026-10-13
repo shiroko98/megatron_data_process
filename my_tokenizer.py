@@ -5,7 +5,6 @@ from abc import ABC
 from abc import abstractmethod
 from megatron_tokenizer import MegatronTokenizer
 from tokenizers import Tokenizer
-import pyrwkv_tokenizer
 from bert_tokenization import FullTokenizer as FullBertTokenizer
 from gpt2_tokenization import GPT2Tokenizer
 from typing import List, Optional, Union, Dict
@@ -61,15 +60,21 @@ def build_tokenizer(args):
 class RWKVTokenizer():
     """RWKV Tokenizer"""
     def __init__(self, vocab_file, vocab_extra_ids):
+        import pyrwkv_tokenizer
+
         self.vocab_file = vocab_file
         self.tokenizer = pyrwkv_tokenizer.RWKVTokenizer(vocab_filepath=vocab_file)
         self._vocab_size = self.tokenizer.vocab_size()
-        self.eod_id = 65532
 
         self._idx2token = {}
 
         # 初始化时读取词汇表文件
         self._load_vocab()
+        self._vocab_size = max(self._vocab_size, max(self._idx2token) + 1)
+        token_ids = self.inv_vocab
+        # 65532 is <|assistant|> in the 20240530 vocabulary, not a delimiter.
+        # Classic RWKV world vocabularies reserve ID 0 as EOS.
+        self.eod_id = token_ids.get(b'<|endoftext|>', token_ids.get(b'<|im_end|>', 0))
 
     def _load_vocab(self):
         """从文件中加载词汇表并创建索引到token和token到索引的映射"""
@@ -152,15 +157,12 @@ class _HFTokenizer(MegatronTokenizer):
 
     @property
     def vocab_size(self):
-        return len(self.tokenizer)  # vocab_size doesn't contain additional tokens
+        # IDs can have gaps; dtype selection must cover the highest ID.
+        return max(self.encoder.values()) + 1
 
     @property
     def vocab(self):
-        return {
-            **{special_token: self.tokenizer.convert_tokens_to_ids(special_token)
-               for special_token in self.tokenizer.additional_special_tokens},
-            **self.tokenizer.vocab,
-        }
+        return self.encoder
 
     @property
     def inv_vocab(self):

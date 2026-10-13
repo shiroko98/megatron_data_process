@@ -9,10 +9,14 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),
                                              os.path.pardir)))
 import time
-import glob
 import traceback
+import hashlib
+from contextlib import ExitStack, contextmanager
+from collections import Counter, deque
+import tempfile
+import signal
+from itertools import islice
 import torch
-import numpy as np
 import multiprocessing
 from queue import Empty
 try:
@@ -57,20 +61,26 @@ def _get_json_key_value(data, key):
     value = data.get(key, "")
     if value is None:
         return ""
+    if not isinstance(value, (str, list)) or (
+        isinstance(value, list) and not all(isinstance(item, str) for item in value)
+    ):
+        raise ValueError(f"Field {key!r} must be a string or a list of strings")
     return value
 
 
 class Encoder(object):
+    initialization_error = None
     def __init__(self, args):
         self.args = args
 
     def initializer(self):
+        Encoder.initialization_error = None
         # Use Encoder class as a container for global data
         Encoder.tokenizer = build_tokenizer(self.args)
         if self.args.split_sentences:
             if not nltk_available:
                 print("NLTK is not available to split sentences.")
-                exit()
+                raise RuntimeError("NLTK is required for sentence splitting")
             if os.environ.get("NLTK_DATA"):
                 library = os.path.join(os.environ.get("NLTK_DATA"), "tokenizers", "punkt", f"{self.args.lang}.pickle")
                 url = f"file:{library}"
@@ -91,13 +101,17 @@ class Encoder(object):
 
     def split(self, json_line):
         data = json.loads(json_line)
+        if not isinstance(data, dict):
+            raise ValueError("Each JSONL row must be a JSON object")
         output = {}
         for key in self.args.json_keys:
             text = _get_json_key_value(data, key)
             max_len = 1000000
-            tokens_list = [Encoder.splitter.tokenize(text[i:i+max_len]) for i in range(0, len(text), max_len)] # 没有tokenizer化，而只是处理长度，可能还会进行分句，但不会ID化（输出是[['《王的中殿之凤舞之阙》是连载于红袖添香网的网络小说，作者是流莫星。 都市言情。都市言情 他是朝鲜的王,她是他的妃,在一次的相遇他们在一起,意味可以这样幸福下去,没想到一次...他,从此他便的更冷酷。。。。。多年后,即时再相遇,俩人也成了陌生人。。。。。敬请关注']]）
+            texts = text if isinstance(text, list) else [text]
+            tokens_list = [Encoder.splitter.tokenize(item[i:i+max_len])
+                           for item in texts for i in range(0, len(item), max_len)]
             output[key] = [tokens for partial in tokens_list for tokens in partial] # 输出是{'text': ['《王的中殿之凤舞之阙》是连载于红袖添香网的网络小说，作者是流莫星。 都市言情。都市言情 他是朝鲜的王,她是他的妃,在一次的相遇他们在一起,意味可以这样幸福下去,没想到一次...他,从此他便的更冷酷。。。。。多年后,即时再相遇,俩人也成了陌生人。。。。。敬请关注']}
-        return json.dumps(output), len(json_line) #  输出是json格式{"text": ["\u300a\u7384\u7687\u964d\u4e16\u3
+        return json.dumps(output, ensure_ascii=False), len(json_line.encode('utf-8'))
 
     def encode(self, json_line):
         try:
@@ -105,7 +119,11 @@ class Encoder(object):
         except json.JSONDecodeError as e:
             # 记录错误信息（可选）
             logging.error(f"JSON decode error: {e} - Line: {json_line}")
-            return None, None, len(json_line)
+            return None, None, len(json_line.encode('utf-8'))
+        if not isinstance(data, dict):
+            raise ValueError("Each JSONL row must be a JSON object")
+        if getattr(Encoder, "initialization_error", None):
+            raise RuntimeError(Encoder.initialization_error)
         ids = {}
         lens = {}
         for key in self.args.json_keys:
@@ -126,7 +144,29 @@ class Encoder(object):
                 sentence_lens[-1] += 1
             ids[key] = doc_ids
             lens[key] = sentence_lens
-        return ids, lens, len(json_line)
+        return ids, lens, len(json_line.encode('utf-8'))
+
+    def worker_initializer(self):
+        # Pool otherwise continually replaces workers whose initializer fails.
+        Encoder.initialization_error = None
+        try:
+            self.initializer()
+        except Exception:
+            Encoder.initialization_error = traceback.format_exc()
+
+    def worker_split(self, json_line):
+        if Encoder.initialization_error:
+            raise RuntimeError(Encoder.initialization_error)
+        return self.split(json_line)
+
+
+def bounded_documents(pool, function, source, workers):
+    """Bound queued input and completed results while preserving document order."""
+    while True:
+        batch = list(islice(source, 32 * workers * 4))
+        if not batch:
+            return
+        yield from pool.imap(function, batch, 32)
 
 
 class Partition(object):
@@ -146,24 +186,24 @@ class Partition(object):
     def split_sentences(self, file_name):
         input_file_name, output_file_name = file_name # _ss就是sentence_split后的输出file name
         print("Opening", input_file_name)
-        fin = open(input_file_name, 'r', encoding='utf-8')
-        fout = open(output_file_name, 'w')
-
         encoder = Encoder(self.args)
-        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
-        split_docs = pool.imap(encoder.split, fin, 32)
-        pool.close()
-
-        proc_start = time.time()
-        total_bytes_processed = 0
-        for i, (doc, bytes_processed) in enumerate(split_docs, start=1):
-            total_bytes_processed += bytes_processed
-            fout.write(doc + "\n")
-            self.print_processing_stats(i, proc_start, total_bytes_processed)
-
-        pool.join()
-        fin.close()
-        fout.close()
+        with open(input_file_name, 'r', encoding='utf-8') as fin, \
+                open(output_file_name, 'w', encoding='utf-8') as fout:
+            pool = multiprocessing.Pool(self.workers, initializer=encoder.worker_initializer)
+            try:
+                split_docs = bounded_documents(pool, encoder.worker_split, fin, self.workers)
+                proc_start = time.time()
+                total_bytes_processed = 0
+                for i, (doc, bytes_processed) in enumerate(split_docs, start=1):
+                    total_bytes_processed += bytes_processed
+                    fout.write(doc + "\n")
+                    self.print_processing_stats(i, proc_start, total_bytes_processed)
+                pool.close()
+            except BaseException:
+                pool.terminate()
+                raise
+            finally:
+                pool.join()
 
         if self.args.partitions != 1:
             os.remove(input_file_name)  # 删除输入文件
@@ -223,50 +263,33 @@ class Partition(object):
     def process_json_file(self, file_name):
         input_file_name, output_prefix = file_name
         print("Opening", input_file_name)
-        fin = open(input_file_name, 'r', encoding='utf-8')
-
         startup_start = time.time()
         encoder = Encoder(self.args)
-        tokenizer_vocab_size = get_tokenizer_vocab_size(self.args)
-        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
-        encoded_docs = pool.imap(encoder.encode, fin, 32)
-        pool.close()
-
-        level = "document"
-        if self.args.split_sentences:
-            level = "sentence"
-
-        output_bin_files = {}
-        output_idx_files = {}
-        builders = {}
-
-        for key in self.args.json_keys:
-            output_bin_files[key] = "{}_{}_{}.bin".format(output_prefix,
-                                                        key, level)
-            output_idx_files[key] = "{}_{}_{}.idx".format(output_prefix,
-                                                        key, level)
-            builders[key] = indexed_dataset.IndexedDatasetBuilder(
-                output_bin_files[key],
-                dtype=indexed_dataset.DType.optimal_dtype(tokenizer_vocab_size),
-            )
-
-        startup_end = time.time()
-        proc_start = time.time()
-        total_bytes_processed = 0
-        print("Time to startup:", startup_end - startup_start)
-        for i, (doc, sentence_lens, bytes_processed) in enumerate(encoded_docs, start=1):
-            total_bytes_processed += bytes_processed
-            if doc is None:
-                # 如果 doc 为 None，表示该行有问题，跳过
-                continue
-            for key in doc.keys():
-                builders[key].add_document(doc[key], sentence_lens[key])
-            self.print_processing_stats(i, proc_start, total_bytes_processed)
-
-        pool.join()
-        fin.close()
-        for key in builders:
-            builders[key].finalize(output_idx_files[key])
+        with open(input_file_name, 'r', encoding='utf-8') as fin, \
+                dataset_builders(self.args, output_prefix) as builders:
+            pool = multiprocessing.Pool(self.workers, initializer=encoder.worker_initializer)
+            try:
+                encoded_docs = bounded_documents(pool, encoder.encode, fin, self.workers)
+                proc_start = time.time()
+                total_bytes_processed = 0
+                skipped = 0
+                print("Time to startup:", proc_start - startup_start)
+                for i, (doc, sentence_lens, bytes_processed) in enumerate(encoded_docs, start=1):
+                    total_bytes_processed += bytes_processed
+                    if doc is None:
+                        skipped += 1
+                        continue
+                    for key in doc:
+                        builders[key].add_document(doc[key], sentence_lens[key])
+                    self.print_processing_stats(i, proc_start, total_bytes_processed)
+                if skipped:
+                    print(f"Skipped {skipped} invalid JSON rows in {input_file_name}", file=sys.stderr)
+                pool.close()
+            except BaseException:
+                pool.terminate()
+                raise
+            finally:
+                pool.join()
         if self.args.partitions != 1 or self.args.split_sentences:
             os.remove(input_file_name)
             print(f"Deleted: {input_file_name}")
@@ -397,6 +420,8 @@ def check_files_exist(in_ss_out_names, key, num_partitions=None):
 
 
 def resolve_runtime_process_settings(workers, max_processes, task_count):
+    if workers <= 0 or max_processes <= 0:
+        raise ValueError("workers and max_processes must be positive")
     task_count = max(1, task_count)
     concurrent_file_processes = max(1, min(max_processes, task_count, workers))
     workers_per_process = max(1, workers // concurrent_file_processes)
@@ -410,7 +435,43 @@ def get_tokenizer_vocab_size(args):
         args.tokenizer_vocab_size = cached_vocab_size
     return cached_vocab_size
 
-def get_input_files(input_path):
+
+@contextmanager
+def dataset_builders(args, output_prefix):
+    """Publish bin/idx only after every field has finished successfully."""
+    level = 'sentence' if args.split_sentences else 'document'
+    targets = {key: f'{output_prefix}_{key}_{level}' for key in args.json_keys}
+    for prefix in targets.values():
+        for suffix in ('.bin', '.idx'):
+            if os.path.exists(prefix + suffix):
+                raise FileExistsError(f"Output already exists: {prefix + suffix}")
+    parent = os.path.dirname(os.path.abspath(output_prefix))
+    os.makedirs(parent, exist_ok=True)
+    dtype = indexed_dataset.DType.optimal_dtype(get_tokenizer_vocab_size(args))
+    with tempfile.TemporaryDirectory(prefix='.preprocess-', dir=parent) as temporary:
+        builders = {}
+        published = []
+        try:
+            for key in targets:
+                builders[key] = indexed_dataset.IndexedDatasetBuilder(
+                    os.path.join(temporary, key + '.bin'), dtype=dtype)
+            yield builders
+            for key, builder in builders.items():
+                builder.finalize(os.path.join(temporary, key + '.idx'))
+            for key, target in targets.items():
+                for suffix in ('.bin', '.idx'):
+                    # Link refuses concurrent overwrites; staging is on the same filesystem.
+                    os.link(os.path.join(temporary, key + suffix), target + suffix)
+                    published.append(target + suffix)
+        except BaseException:
+            for path in published:
+                os.remove(path)
+            raise
+        finally:
+            for builder in builders.values():
+                builder.data_file.close()
+
+def get_input_files(input_path, exclude_directory=None):
     """根据输入路径返回文件列表，包括多层目录中的文件"""
     if not os.path.exists(input_path):
         raise ValueError("The provided input path does not exist.")
@@ -418,6 +479,9 @@ def get_input_files(input_path):
     if os.path.isdir(input_path):
         file_list = []
         for root, dirs, files in os.walk(input_path):
+            if exclude_directory:
+                dirs[:] = [d for d in dirs if os.path.abspath(os.path.join(root, d))
+                           != os.path.abspath(exclude_directory)]
             dirs.sort()
             files.sort()
             for file in files:
@@ -432,30 +496,11 @@ def get_input_files(input_path):
 
 def merge_files(args, in_ss_out_names):
     level = "document" if not args.split_sentences else "sentence"
-    output_bin_files = {}
-    output_idx_files = {}
-    builders = {}
-    tokenizer_vocab_size = get_tokenizer_vocab_size(args)
-
+    with dataset_builders(args, args.output_prefix) as builders:
+        for key, builder in builders.items():
+            for name in in_ss_out_names:
+                builder.add_index(f"{name['output_prefix']}_{key}_{level}")
     for key in args.json_keys:
-        output_bin_files[key] = "{}_{}_{}.bin".format(args.output_prefix,
-                                                      key, level)
-        output_idx_files[key] = "{}_{}_{}.idx".format(args.output_prefix,
-                                                      key, level)
-        builders[key] = indexed_dataset.IndexedDatasetBuilder(
-            output_bin_files[key],
-            dtype=indexed_dataset.DType.optimal_dtype(tokenizer_vocab_size),
-            # dtype=np.uint16
-        )
-
-
-        for name in in_ss_out_names:
-            parition_output_prefix = name['output_prefix']
-            full_partition_output_prefix = "{}_{}_{}".format(parition_output_prefix,
-                                                             key, level)
-            builders[key].add_index(full_partition_output_prefix)
-        builders[key].finalize(output_idx_files[key])
-
         # 删除分区文件
         for name in in_ss_out_names:
             try:
@@ -471,13 +516,41 @@ def merge_files(args, in_ss_out_names):
 
 def manage_processes(task_func, task_args_list, max_processes):
     """管理进程的函数，限制最大并发进程数"""
+    if max_processes <= 0:
+        raise ValueError("max_processes must be positive")
+    pending = deque(task_args_list)
     active_processes = []
     error_queue = multiprocessing.Queue()
     reported_errors = {}
-    while task_args_list or active_processes:
+    try:
+        _manage_processes(task_func, pending, max_processes, active_processes,
+                          error_queue, reported_errors)
+    finally:
+        for p, _ in active_processes:
+            if p.is_alive():
+                _terminate_task(p)
+            p.join()
+        error_queue.close()
+        error_queue.join_thread()
+
+
+def _terminate_task(process):
+    # A file task owns its tokenizer workers; stop its whole isolated group.
+    try:
+        if hasattr(os, 'killpg') and os.getpgid(process.pid) == process.pid:
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        pass
+
+
+def _manage_processes(task_func, pending, max_processes, active_processes,
+                      error_queue, reported_errors):
+    while pending or active_processes:
         # 如果有空闲进程槽且还有任务未启动，则启动新的进程
-        while task_args_list and len(active_processes) < max_processes:
-            task_args = task_args_list.pop(0)  # 获取一组待处理参数
+        while pending and len(active_processes) < max_processes:
+            task_args = pending.popleft()
             p = multiprocessing.Process(
                 target=_run_task_with_error_reporting,
                 args=(task_func, task_args, error_queue),
@@ -502,7 +575,7 @@ def manage_processes(task_func, task_args_list, max_processes):
         if failed_process_info is not None:
             failed_process, failed_task_args, error_info = failed_process_info
             for p, _ in next_active_processes:
-                p.terminate()
+                _terminate_task(p)
                 p.join()
             raise RuntimeError(_format_child_process_error(
                 task_func,
@@ -511,12 +584,14 @@ def manage_processes(task_func, task_args_list, max_processes):
                 error_info,
             ))
 
-        active_processes = next_active_processes
+        active_processes[:] = next_active_processes
 
         time.sleep(0.5)  # 稍微等待一下再次检查
 
 
 def _run_task_with_error_reporting(task_func, task_args, error_queue):
+    if hasattr(os, 'setsid') and multiprocessing.parent_process() is not None:
+        os.setsid()
     try:
         task_func(task_args)
     except Exception as exc:
@@ -574,6 +649,15 @@ def _extract_input_file_from_task_args(task_args):
     return None
 
 def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["text"], split_sentences=False, keep_newlines=False, tokenizer_model=None, vocab_size=65532, merge_file=None, workers=6, max_processes=6, log_interval=1000, append_eod=True, lang='english', partitions=1, merge_partitions=True, keep_sequential_samples=False):
+    if any(value <= 0 for value in (workers, max_processes, partitions, log_interval)):
+        raise ValueError("workers, max_processes, partitions and log_interval must be positive")
+    if not jsonl_keys or len(set(jsonl_keys)) != len(jsonl_keys):
+        raise ValueError("jsonl_keys must be nonempty and unique")
+    if any(not key or '/' in key or '\\' in key for key in jsonl_keys):
+        raise ValueError("jsonl_keys must not contain path separators")
+    # The process pool supplies parallelism; disable HF's inherited thread pool.
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+    os.makedirs(os.path.dirname(os.path.abspath(output_prefix)), exist_ok=True)
     args = argparse.Namespace(
         input=input,
         output_prefix=output_prefix,
@@ -621,7 +705,9 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
 
     in_ss_out_names = []
     if args.partitions == 1:
-        in_file_names = get_input_files(args.input)
+        in_file_names = get_input_files(args.input, exclude_directory=get_intermediate_dir(args))
+        if not in_file_names:
+            raise ValueError("No JSONL files found in the input directory")
         if len(in_file_names) == 1:
             file_names = {
                 'partition': in_file_names[0],
@@ -629,10 +715,15 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
                 'output_prefix': args.output_prefix}
             in_ss_out_names.append(file_names) # 输入的文件
         else:
+            base_counts = Counter(os.path.basename(os.path.splitext(path)[0])
+                                  for path in in_file_names)
             for file in in_file_names:
                 file_name, extension = os.path.splitext(file)
                 sentence_split_file = get_sentence_split_file(args, file)
                 output_prefix = args.output_prefix + "_" + os.path.basename(file_name)
+                if base_counts[os.path.basename(file_name)] > 1:
+                    relative = os.path.relpath(file, args.input)
+                    output_prefix += '_' + hashlib.sha256(relative.encode('utf-8')).hexdigest()[:12]
                 file_names = {
                 'partition': file,
                 'sentence_split': sentence_split_file,
@@ -641,56 +732,51 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
 
     else:
         # in_file_names = glob.glob(args.input) # 写明通配符 # 匹配当前目录及所有子目录中的 txt 文件 txt_files = glob.glob('**/*.txt', recursive=True)
-        in_file_names = get_input_files(args.input)
+        in_file_names = get_input_files(args.input, exclude_directory=get_intermediate_dir(args))
 
         # Count total number of lines across .jsonl files 
         if args.keep_sequential_samples:
             total_sample_count = 0
             for filename in in_file_names:
-                with open(filename, "r") as fin:
-                    for fc, _ in enumerate(fin):
-                        pass
-                total_sample_count += (fc + 1)
-            partition_size = math.ceil(total_sample_count / args.partitions)
+                with open(filename, "r", encoding='utf-8') as fin:
+                    total_sample_count += sum(1 for _ in fin)
+            partition_size = max(1, math.ceil(total_sample_count / args.partitions))
 
         # create .jsonl parition files
         for idx in range(args.partitions):
             in_ss_out_name = get_file_name(args, idx)
             in_ss_out_names.append(in_ss_out_name)
 
-        # check to see if paritions were already created
-        partitions_present = check_files_exist(in_ss_out_names, 'partition', args.partitions)
-
-        # check to see if paritions with split sentences already created
-        split_sentences_present = check_files_exist(in_ss_out_names, 'sentence_split', args.partitions)
-
-        if not partitions_present and not split_sentences_present:
-            # populate .jsonl partition files from parent files
-            partitioned_input_files = []
-            for idx in range(args.partitions):
-                partitioned_input_file = open(in_ss_out_names[idx]['partition'], 'w')
-                partitioned_input_files.append(partitioned_input_file) # partition文件句柄的列表
-
-            index = 0
-            if args.keep_sequential_samples: line_count = 0
-            for in_file_name in in_file_names: # 父jsonl文件
-                fin = open(in_file_name, 'r', encoding='utf-8') # 打开父jsonl文件
-
-                for line in fin:
-                    partitioned_input_files[index].write(line) # 写入其中一个子partition文件
-                    if args.keep_sequential_samples:
-                        line_count += 1
-                        if line_count % partition_size == 0: # 若sequential，写满一个子文件再写另一个
-                            index += 1
-                    else:
-                        index = (index + 1)%args.partitions # 否则多个子partition文件换着写
-
-                fin.close()
-
-            for idx in range(args.partitions):
-                partitioned_input_files[idx].close()
 
     task_count = len(in_ss_out_names)
+    if not in_file_names:
+        raise ValueError("No JSONL files found in the input directory")
+    level = 'sentence' if split_sentences else 'document'
+    prefixes = [name['output_prefix'] for name in in_ss_out_names]
+    if merge_partitions and (partitions > 1 or len(in_file_names) > 1):
+        prefixes.append(args.output_prefix)
+    for prefix in prefixes:
+        for key in args.json_keys:
+            for suffix in ('.bin', '.idx'):
+                path = f'{prefix}_{key}_{level}{suffix}'
+                if os.path.exists(path):
+                    raise FileExistsError(f"Output already exists: {path}; choose a new output prefix")
+    if args.partitions > 1:
+        # Recreate scratch data from the current input, never reuse stale contents.
+        with ExitStack() as stack:
+            partitioned_input_files = [stack.enter_context(open(
+                name['partition'], 'w', encoding='utf-8')) for name in in_ss_out_names]
+            index = 0
+            line_count = 0
+            for in_file_name in in_file_names:
+                with open(in_file_name, 'r', encoding='utf-8') as fin:
+                    for line in fin:
+                        if args.keep_sequential_samples:
+                            index = min(line_count // partition_size, args.partitions - 1)
+                        partitioned_input_files[index].write(line)
+                        line_count += 1
+                        if not args.keep_sequential_samples:
+                            index = (index + 1) % args.partitions
     if args.tokenizer_type.lower() in {"rwkvtokenizer", "hftokenizer"}:
         get_tokenizer_vocab_size(args)
     effective_max_processes, workers_per_process = resolve_runtime_process_settings(
@@ -704,7 +790,7 @@ def process_data(input, output_prefix, tokenizer_type, vocab_file, jsonl_keys=["
     split_sentences_present = check_files_exist(in_ss_out_names, 'sentence_split')
 
     # split sentences in partition files
-    if args.split_sentences and not split_sentences_present:
+    if args.split_sentences:
         task_args_list = [(name['partition'], name['sentence_split']) for name in in_ss_out_names]
         manage_processes(partition.split_sentences, task_args_list, effective_max_processes)
         # processes = []
